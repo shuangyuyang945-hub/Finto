@@ -1,0 +1,172 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="theme-color" content="#f3efe6"><title>Finto · 项目交付</title>
+  <meta name="description" content="核对要求、明确责任、跟踪交付与版本。">
+  <script src="/project-overview.js" defer></script>
+  <link rel="stylesheet" href="/styles.css"><link rel="stylesheet" href="/tags.css"><link rel="stylesheet" href="/calendar.css"><link rel="stylesheet" href="/update.css"><link rel="stylesheet" href="/agent-review.css">
+</head>
+<body>
+<div class="app-shell">
+  <aside class="sidebar">
+    <div class="brand"><div class="brand-mark">F</div><div><strong>Finto</strong><span>项目交付</span></div></div>
+    <nav class="nav" aria-label="主导航">
+      <button class="nav-item active" data-view="projects"><span>⌂</span>项目总览</button>
+      <button class="nav-item" data-view="deliverables"><span>◇</span>交付清单</button>
+      <button class="nav-item" data-view="agentReview"><span>◎</span>待审建议</button>
+      <button class="nav-item" data-view="library"><span>▤</span>资料库（未按项目关联）</button>
+    </nav>
+    <div class="sidebar-foot"><button class="nav-item" data-view="settings"><span>⚙</span>设置</button><div class="local-badge"><i></i>数据保存在本机</div></div>
+  </aside>
+  <main class="main">
+    <header class="topbar">
+      <button id="menuButton" class="icon-button menu-button" aria-label="打开导航">☰</button>
+      <div><p id="eyebrow"></p><h1 id="pageTitle">项目总览</h1></div>
+      <button class="primary-button" data-open-capture><span>＋</span>添加资料</button>
+    </header>
+
+    <section id="projectsView" class="view active">
+      <section class="panel project-context-panel">
+        <div class="panel-head">
+          <div><span class="section-kicker">CURRENT PROJECT</span><h2>当前项目与周期</h2></div>
+          <div class="project-context-actions"><button id="createProjectButton" class="primary-button" type="button">＋ 创建项目</button><button id="refreshProjects" class="secondary-button" type="button">刷新</button></div>
+        </div>
+        <label>选择项目<select id="projectChoice"><option>加载中……</option></select></label>
+        <p id="projectContext" class="project-context-summary" role="status"></p>
+        <div id="projectMetrics" class="stats-grid"></div>
+        <p id="projectNextAction" class="project-next-action"></p>
+        <div class="project-workspace-actions"><button id="openProjectReview" class="secondary-button" type="button">查看本项目待审建议</button><button class="secondary-button" type="button" data-view-jump="deliverables">查看交付清单</button></div>
+      </section>
+      <section class="panel project-path-panel" aria-labelledby="projectPathTitle">
+        <span class="section-kicker">START HERE</span><h2 id="projectPathTitle">按这四步完成一次交付整理</h2>
+        <p>先确定项目范围。第2步可以添加新资料，也可以跳过；已有合适资料可直接跳到第3步。保存到资料库不会自动授权给任务，只有第3步勾选的资料会进入本次任务。</p>
+        <ol id="projectDeliveryPath" class="project-delivery-path">
+          <li id="projectPathProject" class="project-path-step"><strong>1. 创建或选择项目</strong><span id="projectPathProjectStatus">正在检查项目……</span></li>
+          <li id="projectPathSource" class="project-path-step"><strong>2. 添加新资料（可选）</strong><span id="projectPathSourceStatus">正在检查资料……</span><button id="openProjectSource" class="secondary-button" type="button" data-open-capture>添加新资料</button></li>
+          <li id="projectPathAuthorization" class="project-path-step"><strong>3. 勾选本次授权资料</strong><span id="projectPathAuthorizationStatus">先选择一个进行中的项目。</span></li>
+          <li id="projectPathRun" class="project-path-step"><strong>4. 运行并进入待审</strong><span id="projectPathRunStatus">完成前3步后再运行；结果不会直接写入交付清单。</span></li>
+        </ol>
+      </section>
+      <section class="panel project-agent-panel">
+        <span class="section-kicker">NEXT ACTION</span>
+        <h2>生成交付建议</h2><p id="taskProjectLabel">请先创建或选择项目。</p>
+        <form id="projectAgentForm"><fieldset id="projectAgentFields" disabled style="border:0;padding:0">
+          <label>3. 勾选本次任务可使用的资料</label><div id="taskSourceChoices">正在加载资料……</div>
+          <label style="margin-top:16px">运行方式<select id="taskExecutionMode"><option value="deterministic">本地规则整理（不调用模型）</option><option value="ai">DeepSeek 辅助整理（调用模型）</option></select></label>
+          <div id="executionModeGuide" class="execution-mode-guide" aria-label="运行方式选择说明">
+            <button class="execution-mode-choice" type="button" data-execution-mode-choice="deterministic"><strong>本地规则整理（不调用模型）</strong><span>适合：资料中有明确字段标签，例如“阶段成果、交付时间、验收要求”。免费且资料不发送给模型；没识别出的内容会列为待补充与确认。</span></button>
+            <button class="execution-mode-choice" type="button" data-execution-mode-choice="ai"><strong>DeepSeek 辅助整理（调用模型）</strong><span>适合：要求分散在自然语言中，需要归纳上下文。只发送本次授权资料，可能产生模型费用。</span></button>
+          </div>
+          <p class="execution-mode-boundary">系统不会自动切换或自动调用模型。两种方式都只生成待审候选，不会直接修改正式交付内容。</p>
+          <label style="margin-top:16px">任务要求<textarea id="taskInstruction" rows="3" required>提取交付成果、截止日期及其字段级证据。缺少依据的内容列为待补充与确认，不猜测，不直接修改正式交付物。</textarea></label>
+          <button class="primary-button" type="submit">4. 冻结本次授权并运行</button>
+        </fieldset></form>
+        <p id="projectAgentStatus" role="status" style="white-space:pre-wrap"></p>
+        <button id="openTaskReview" class="secondary-button" type="button" hidden>进入本次待审建议</button>
+      </section>
+    </section>
+    <section id="deliverablesView" class="view"><section class="panel"><h2 id="deliverableProjectTitle">交付清单</h2><p>显示本项目所有交付物的当前版本。现有数据尚未记录交付物所属周期，不按周期筛选。</p><div id="projectDeliverables" style="overflow:auto" role="status">加载中……</div></section></section>
+    <section id="todayView" class="view">
+      <div class="quote-card"><span class="quote-mark">“</span><p>知识的价值，不在于收藏，而在于改变下一步行动。</p><span class="quote-note">今天只做一件真正重要的事</span></div>
+      <div class="dashboard-grid">
+        <section class="panel tasks-panel"><div class="panel-head"><div><span class="section-kicker">ACTION</span><h2>今日待办</h2></div><button id="addTaskButton" class="text-button">＋ 添加</button></div><div id="todayTasks" class="task-list"></div></section>
+        <section class="panel reading-panel"><div class="panel-head"><div><span class="section-kicker">READING</span><h2>正在阅读</h2></div><button class="text-button" data-view-jump="library" data-filter="book">全部</button></div><div id="readingCard"></div></section>
+        <section class="panel journal-panel"><div class="panel-head"><div><span class="section-kicker">REFLECTION</span><h2>今日日记</h2></div><span class="soft-label">仅本地</span></div><textarea id="journalDraft" placeholder="今天发生了什么？我学到了什么？"></textarea><div class="journal-actions"><span>自动保留草稿</span><button id="saveJournalButton" class="secondary-button">保存今日日记</button></div></section>
+        <section class="panel recent-panel"><div class="panel-head"><div><span class="section-kicker">RECENT</span><h2>最近知识</h2></div><button class="text-button" data-view-jump="library">进入知识库</button></div><div id="recentKnowledge" class="recent-list"></div></section>
+      </div>
+      <section class="panel week-panel">
+        <div class="panel-head"><div><span class="section-kicker">WEEK PLAN</span><h2>周待办日历</h2></div><div class="week-controls"><button id="prevWeek" class="calendar-button" aria-label="上一周">←</button><button id="currentWeek" class="calendar-button current">本周</button><strong id="weekRange"></strong><button id="nextWeek" class="calendar-button" aria-label="下一周">→</button></div></div>
+        <div class="week-plan-editor"><div><strong>本周计划</strong><span>写下这一周真正想推进的方向，日历负责承接具体行动。</span></div><textarea id="weekPlanText" rows="4" placeholder="本周目标：&#10;1. &#10;2. &#10;&#10;需要留意："></textarea><div class="week-plan-actions"><span id="weekPlanStatus">按周保存在本机</span><button id="saveWeekPlan" class="secondary-button">保存周计划</button></div></div>
+        <div class="calendar-scroll"><div id="weekCalendar" class="week-calendar"></div></div>
+        <div class="calendar-legend"><span><i class="legend-dot high"></i>重要</span><span><i class="legend-dot"></i>普通</span><span>点击日期后可快速添加该日待办</span></div>
+      </section>
+    </section>
+
+    <section id="libraryView" class="view">
+      <section class="panel" style="margin-bottom:20px"><h2>交付依据资料库</h2><p>在这里查阅要求、反馈和验收依据，再为每次 AI 任务选择授权来源。</p><p class="form-hint">当前资料跨项目共用，尚未建立项目关联。允许 AI 使用不代表已授权给某次任务。权限状态目前只读。</p></section>
+      <div class="library-toolbar"><div class="filter-row" id="libraryFilters">
+        <button class="filter active" data-filter="all">全部资料</button><label>AI使用状态<select id="sourceAccessFilter"><option value="all">全部状态</option><option value="1">允许 AI 使用</option><option value="0">禁止 AI 使用</option></select></label>
+      </div><label class="search-box"><span>⌕</span><input id="librarySearch" placeholder="搜索标题、标签或内容"></label></div>
+      <details class="category-map-panel"><summary>原有资料分类（保留历史组织方式）</summary><div class="category-map-head"><div><h2>资料分类</h2><p>这些分类不是项目归属；旧资料和分类保持保留。</p></div><button id="addRootCategory" class="secondary-button">＋ 新建分类</button></div><div id="categoryMap" class="category-map"></div></details>
+      <div id="libraryGrid" class="library-grid"></div>
+    </section>
+
+    <section id="chatView" class="view">
+      <div class="chat-tabs"><button class="chat-tab active" data-chat-tab="ask">与知识库聊天</button><button class="chat-tab" data-chat-tab="archive">对话归档</button></div>
+      <div id="askTab" class="chat-workspace active">
+        <div class="chat-intro"><div class="chat-orb">F</div><h2>查询项目资料</h2><p>回答会优先检索允许 AI 使用的项目资料，并列出引用来源。</p></div>
+        <div id="chatMessages" class="chat-messages"></div>
+        <form id="knowledgeChatForm" class="chat-composer"><textarea id="knowledgeQuestion" rows="2" placeholder="例如：这个项目的验收标准是什么？"></textarea><button class="primary-button" type="submit">发送 ↗</button></form>
+      </div>
+      <div id="archiveTab" class="chat-workspace">
+        <div class="archive-layout">
+          <section class="panel archive-form-card"><span class="section-kicker">SOURCE</span><h2>归档指定聊天路径</h2><p>只读取你指定的文件或目录，并从上次位置继续。提炼成功后会保存为“聊天知识”，你可以再手动调整标签和归类。支持 Markdown、TXT、JSON。</p><form id="archiveForm"><label>聊天路径<input id="chatPath" placeholder="例如 D:\AI-Chats\FDE" required></label><label>归档日期<input id="archiveDate" type="date"></label><button class="primary-button" type="submit">读取并归档新增内容</button></form></section>
+          <section class="panel archive-result-card"><span class="section-kicker">DRAFT</span><h2>当日归档草稿</h2><div id="archiveResult" class="archive-result empty-state">提供路径后，这里会出现值得保留的知识、想法、决定和待办建议。</div></section>
+        </div>
+        <section class="panel source-list-panel"><div class="panel-head"><div><span class="section-kicker">DAILY ARCHIVE</span><h2>已登记的聊天来源</h2></div><button id="archiveAllSources" class="secondary-button" disabled>归档今日全部来源</button></div><div id="chatSources" class="source-list"></div></section>
+        <section class="panel markdown-import-panel"><div class="panel-head"><div><span class="section-kicker">MARKDOWN</span><h2>导入整理好的聊天 Markdown</h2></div></div><p>选择一个或多个 Markdown 文件，再从知识库已有的分类卡片中选择归属。导入内容会进入该分类所属的知识、书籍、媒体等类型；需要新分类时，可先在分类思维导图中创建。</p><form id="markdownImportForm"><label>聊天 Markdown 文件<input id="markdownFiles" type="file" accept=".md,.markdown,text/markdown" multiple required></label><label>选择已有分类<select id="markdownCategory"><option value="">未分类（保存为聊天知识）</option></select></label><button class="primary-button" type="submit">导入到所选分类</button></form><div id="markdownImportResult" class="archive-result empty-state">导入结果会显示在这里。</div></section>
+      </div>
+    </section>
+
+    <section id="agentReviewView" class="view">
+      <div class="agent-review-intro">
+        <div><span class="section-kicker">HUMAN IN THE LOOP</span><h2>AI 候选必须经过负责人审查</h2><p>左侧是冻结的任务合同，中间保留 AI 原始输出，右侧才是负责人准备写入的正式草稿。</p></div>
+        <div class="review-mode-switch" aria-label="审查记录范围"><button id="pendingReviewMode" class="active" type="button">待我处理 <span id="pendingReviewCount">0</span></button><button id="reviewHistoryMode" type="button">已处理历史 <span id="agentReviewHistoryCount">0</span></button></div>
+      </div>
+      <div class="agent-review-shell">
+        <aside class="review-queue panel"><h3 id="agentReviewQueueTitle">待审任务</h3><div id="agentReviewQueue"></div></aside>
+        <div id="agentReviewWorkspace" class="review-workspace">
+          <div class="empty-state">当前没有等待负责人处理的 AI 候选。</div>
+        </div>
+      </div>
+    </section>
+
+    <section id="reviewView" class="view"><div id="reviewStats" class="stats-grid"></div><div class="review-grid"><section class="panel"><span class="section-kicker">WEEKLY REVIEW</span><h2>本周值得记住</h2><div id="weeklyHighlights" class="review-list"></div></section><section class="panel"><span class="section-kicker">OPEN LOOPS</span><h2>仍在推进</h2><div id="openLoops" class="review-list"></div></section></div><section class="panel task-history-panel"><div class="panel-head"><div><span class="section-kicker">TASK HISTORY</span><h2>待办周记录</h2></div><select id="historyWeekSelect" aria-label="选择历史周"></select></div><div id="taskHistory" class="task-history"></div></section></section>
+
+    <section id="settingsView" class="view"><div class="settings-wrap">
+      <section class="panel settings-card"><span class="section-kicker">AI CONNECTION</span><h2>OpenAI-compatible 服务</h2><p>配置只保存在本机。未配置时，其他知识管理功能仍可正常使用。</p><form id="settingsForm"><label>API 地址<input id="baseUrl" placeholder="https://api.openai.com/v1"></label><label>模型<input id="modelName" placeholder="填写服务支持的模型名称"></label><label>API 密钥<input id="apiKey" type="password" placeholder="sk-..." autocomplete="off"></label><button class="primary-button" type="submit">保存设置</button></form></section>
+      <section class="panel privacy-card"><span class="section-kicker">LOCAL FIRST</span><h2>你的数据属于你</h2><ul><li>知识正文保存为普通 Markdown 文件</li><li>任务和归档进度保存到本地 SQLite</li><li>只读取你主动提供的聊天路径</li><li>知识库聊天只使用允许 AI 访问的内容</li></ul></section>
+      <section class="panel data-card"><span class="section-kicker">DATA SAFETY</span><h2>备份与恢复</h2><p>备份会同时保存知识正文、分类、待办和设置。恢复前会自动再生成一份安全备份。</p><div class="system-meta"><span>数据目录</span><strong id="dataLocation">读取中……</strong><span>数据库版本</span><strong id="schemaVersion">—</strong></div><div class="backup-actions"><button id="createBackupButton" class="primary-button" type="button">创建完整备份</button><select id="backupSelect" aria-label="选择备份"><option value="">还没有备份</option></select><button id="restoreBackupButton" class="secondary-button" type="button" disabled>恢复所选备份</button></div><p id="backupStatus" class="inline-status">备份保存在本机独立数据目录。</p></section>
+      <section class="panel trash-card"><div class="panel-head"><div><span class="section-kicker">RECYCLE BIN</span><h2>回收站</h2></div><span id="trashCount" class="soft-label">0 条</span></div><p>删除的知识会先保留在这里；永久删除后，对应 Markdown 文件才会被移除。</p><div id="trashList" class="trash-list"></div></section>
+      <section class="panel version-card"><span class="section-kicker">PRODUCT</span><h2>版本与使用引导</h2><p>当前版本 <strong id="appVersion">—</strong>。安装更新版本时，只替换应用程序，不会覆盖独立数据目录。</p><div class="update-actions"><button id="checkUpdateButton" class="primary-button" type="button">检查更新</button><button id="reopenOnboarding" class="secondary-button" type="button">重新查看首次使用引导</button></div><p id="updateStatus" class="inline-status">尚未检查更新。</p></section>
+    </div></section>
+  </main>
+</div>
+
+<dialog id="createProjectDialog" class="modal" aria-labelledby="createProjectTitle"><form id="createProjectForm">
+  <div class="modal-head"><div><span class="section-kicker">PROJECT DELIVERY</span><h2 id="createProjectTitle">创建交付项目</h2></div><button id="closeCreateProject" type="button" class="icon-button" aria-label="关闭">×</button></div>
+  <label>项目名称<input id="newProjectName" required placeholder="例如：课程项目交付"></label>
+  <label>项目负责人<input id="newProjectOwner" required placeholder="谁负责核对要求和审查建议"></label>
+  <label>本轮范围<textarea id="newProjectScope" rows="4" placeholder="例如：完成数据库与配套说明文档"></textarea></label>
+  <p class="form-hint">创建后，项目进入进行中状态，并建立第1周期。交付物、资料授权和AI任务需后续单独建立。</p>
+  <p id="createProjectStatus" role="status"></p>
+  <div class="modal-actions"><button id="cancelCreateProject" type="button" class="secondary-button">取消</button><button id="submitCreateProject" type="submit" class="primary-button">创建项目与第1周期</button></div>
+</form></dialog>
+<dialog id="captureDialog" class="modal"><form id="captureForm" method="dialog">
+  <div class="modal-head"><div><span class="section-kicker">DELIVERY SOURCE</span><h2>添加交付依据</h2></div><button type="button" class="icon-button" data-close-modal>×</button></div>
+  <label>资料名称<input id="captureTitle" required placeholder="例如：项目任务书、检查反馈"></label><label>资料原文<textarea id="captureBody" rows="9" required placeholder="粘贴已经确认可以保存的要求、反馈或验收依据原文"></textarea></label>
+  <p class="form-hint">资料会保存到交付依据资料库，并默认允许 AI 使用。保存资料不等于授权给本次任务；运行任务前仍需在当前项目中明确选择本次授权资料。</p><div class="modal-actions"><button type="button" class="secondary-button" data-close-modal>取消</button><button class="primary-button" type="submit">保存资料</button></div>
+</form></dialog>
+
+<dialog id="taskDialog" class="modal small-modal"><form id="taskForm" method="dialog">
+  <div class="modal-head"><div><span class="section-kicker">NEW TASK</span><h2>添加待办</h2></div><button type="button" class="icon-button" data-close-task>×</button></div><label>待办内容<input id="taskTitle" required placeholder="下一步要做什么？"></label><div class="form-grid"><label>日期<input id="taskDate" type="date"></label><label>时间<input id="taskTime" type="time"></label></div><label>优先级<select id="taskPriority"><option value="normal">普通</option><option value="high">重要</option><option value="low">稍后</option></select></label><div class="modal-actions"><button type="button" class="secondary-button" data-close-task>取消</button><button class="primary-button" type="submit">加入待办</button></div>
+</form></dialog>
+<dialog id="editDialog" class="modal"><form id="editForm" method="dialog">
+  <div class="modal-head"><div><span class="section-kicker">EDIT CONTENT</span><h2>编辑知识内容</h2></div><button type="button" class="icon-button" data-close-edit>×</button></div>
+  <label>内容标题<input id="editTitle" required></label><label>Markdown 正文<textarea id="editBody" rows="12" placeholder="编辑知识正文……"></textarea></label><div class="form-grid"><label>内容类型<select id="editType"><option value="thought">随手想法</option><option value="knowledge">正式知识</option><option value="book">读书记录</option><option value="media">视频 / 网页</option><option value="journal">日记</option><option value="project">项目</option><option value="chat-note">聊天知识</option></select></label><label>分类卡片<select id="editCategory"><option value="">未分类</option></select></label></div><label>辅助标签<input id="editTags" placeholder="多个标签用逗号分隔"></label><div class="modal-actions split-actions"><button id="deleteContentButton" type="button" class="danger-button">移到回收站</button><span><button type="button" class="secondary-button" data-close-edit>取消</button><button class="primary-button" type="submit">保存修改</button></span></div>
+</form></dialog>
+<dialog id="categoryDialog" class="modal small-modal"><form id="categoryForm" method="dialog">
+  <div class="modal-head"><div><span class="section-kicker">CATEGORY CARD</span><h2 id="categoryDialogTitle">新建分类卡片</h2></div><button type="button" class="icon-button" data-close-category>×</button></div><label>卡片名称<input id="categoryName" required placeholder="例如 客户沟通"></label><div class="form-grid"><label>所属内容类型<select id="categoryType"><option value="knowledge">知识</option><option value="book">书籍</option><option value="media">媒体</option><option value="thought">想法</option><option value="journal">日记</option><option value="project">项目</option><option value="chat-note">聊天知识</option></select></label><label>母卡<select id="categoryParent"><option value="">无母卡（作为根卡片）</option></select></label></div><div class="modal-actions split-actions"><button id="deleteCategoryButton" type="button" class="danger-button" hidden>删除分类</button><span><button type="button" class="secondary-button" data-close-category>取消</button><button class="primary-button" type="submit">保存分类</button></span></div>
+</form></dialog>
+<dialog id="onboardingDialog" class="onboarding-modal">
+  <div class="onboarding-shell">
+    <div class="onboarding-progress" aria-label="引导进度"><i></i><i></i><i></i></div>
+    <section class="onboarding-step" data-onboarding-step="0"><span class="onboarding-mark">B</span><span class="section-kicker">WELCOME TO BRAINSTORM</span><h2>先确定这次要完成什么</h2><p>每次工作从一个交付项目和当前周期开始，项目负责人负责确认范围、依据和最终成果。</p></section>
+    <section class="onboarding-step" data-onboarding-step="1" hidden><span class="onboarding-symbol">资料<br><b>授权</b></span><span class="section-kicker">SOURCE BOUNDARY</span><h2>资料先保存，再逐次授权</h2><p>资料库保存要求、反馈和验收依据；只有你在当前项目中明确选择的资料，才能进入本次整理任务。</p></section>
+    <section class="onboarding-step" data-onboarding-step="2" hidden><span class="onboarding-symbol capture-symbol">✓</span><span class="section-kicker">HUMAN IN THE LOOP</span><h2>候选先审查，再成为成果</h2><p>系统只生成带证据的候选。负责人核对并创建待确认成果后，正式版本才进入后续确认和执行。</p></section>
+    <div class="onboarding-actions"><button id="skipOnboarding" class="text-button" type="button">跳过引导</button><span><button id="previousOnboarding" class="secondary-button" type="button" hidden>上一步</button><button id="nextOnboarding" class="primary-button" type="button">下一步</button><button id="finishOnboarding" class="primary-button" type="button" hidden>添加第一份资料</button></span></div>
+  </div>
+</dialog>
+<div id="toast" class="toast" role="status"></div><script src="/app.js" defer></script>
+</body></html>

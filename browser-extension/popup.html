@@ -1,0 +1,15 @@
+<!doctype html>
+<html lang="zh-CN">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><link rel="stylesheet" href="popup.css"><title>Finto 采集器</title></head>
+<body>
+  <main>
+    <header><span>F</span><div><strong>保存到 Finto</strong><small>视频与网页采集</small></div></header>
+    <label>标题<input id="title" placeholder="当前页面标题"></label>
+    <div class="row"><label>来源类型<select id="sourceKind"><option value="视频">视频</option><option value="网页">网页</option></select></label><label>分类路径<input id="categoryPath" placeholder="AI学习 / Prompt"></label></div>
+    <label>补充笔记<textarea id="selection" rows="5" placeholder="可粘贴字幕、摘录或自己的想法；页面中已选中的文字会自动带入。"></textarea></label>
+    <button id="capture">提炼并保存到知识库</button>
+    <p id="status">本地知识库需要保持运行。</p>
+  </main>
+  <script src="popup.js"></script>
+</body>
+</html>

@@ -1,0 +1,12 @@
+{
+  "manifest_version": 3,
+  "name": "Finto 采集器",
+  "version": "0.2.0",
+  "description": "把当前视频或网页资料保存到本地 Finto 项目资料库。",
+  "permissions": ["activeTab", "scripting"],
+  "host_permissions": ["http://localhost:8765/*", "http://127.0.0.1:8765/*"],
+  "action": {
+    "default_title": "保存到 Finto",
+    "default_popup": "popup.html"
+  }
+}
