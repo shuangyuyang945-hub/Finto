@@ -26,3 +26,11 @@ evals/
 labs/
 practice/
 科研目录结构设计建议.md
+
+# Local job-search materials must not be published with the Finto product.
+product-docs/*求职*
+product-docs/*简历*
+product-docs/*JD*
+product-docs/*岗位*
+product-docs/*投递*
+product-docs/*面试*

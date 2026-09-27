@@ -128,7 +128,6 @@ python -m unittest discover -s tests -v
 - [土壤三普历史案例回放方案](product-docs/Finto土壤三普历史案例回放方案.md)
 - [三分钟产品 Demo](product-docs/Finto三分钟产品Demo.md)
 - [七分钟售前 Demo](product-docs/Finto七分钟售前Demo.md)
-- [简历项目与面试表达](product-docs/Finto简历项目与面试表达.md)
 - [故障定位 SOP](product-docs/Finto故障定位SOP.md)
 - [专业 Pushback](product-docs/Finto专业Pushback.md)
 
