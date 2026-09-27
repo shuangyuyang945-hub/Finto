@@ -1,9 +1,11 @@
+import base64
 import json
 import sqlite3
 import tempfile
 import threading
 import unittest
 import urllib.error
+import urllib.parse
 import urllib.request
 from http.server import ThreadingHTTPServer
 from pathlib import Path
@@ -220,7 +222,7 @@ class AgentJobMigrationTests(unittest.TestCase):
                 self.assertIn("'rejected'", agent_jobs_sql)
                 self.assertEqual(allowed_source_count, 1)
                 self.assertEqual(candidate_count, 1)
-                self.assertEqual(migration_version, 10)
+                self.assertEqual(migration_version, 13)
                 self.assertIn("acceptance_criteria", revision_columns)
                 self.assertNotIn(
                     "deliverable_id INTEGER NOT NULL UNIQUE",
@@ -247,6 +249,41 @@ class ProjectDeliverableTests(unittest.TestCase):
         self.thread.join(timeout=5)
         self.temp_dir.cleanup()
 
+    def post_json(self, path, payload):
+        request = urllib.request.Request(
+            f"{self.base_url}{path}",
+            data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=5) as response:
+                return response.status, json.loads(response.read().decode("utf-8"))
+        except urllib.error.HTTPError as error:
+            return error.code, json.loads(error.read().decode("utf-8"))
+
+    def create_project_with_deliverable(self, name="变更控制项目"):
+        status, project = self.post_json(
+            "/api/projects",
+            {"name": name, "owner": "项目负责人", "scope": "验证项目变更闭环"},
+        )
+        self.assertEqual(status, 201, project)
+        status, deliverable = self.post_json(
+            f"/api/projects/{project['id']}/deliverables",
+            {
+                "title": "数据库和说明文档",
+                "scope": "交付数据库",
+                "owner": "执行负责人",
+                "approver": "项目负责人",
+                "due_date": "2026-09-30",
+                "due_date_status": "confirmed",
+                "acceptance_criteria": "数据库能够启动",
+                "is_required": True,
+            },
+        )
+        self.assertEqual(status, 201, deliverable)
+        return project, deliverable
+
     def test_project_deliverable_tables_exist(self):
         with server.db() as connection:
             for table_name in (
@@ -255,6 +292,7 @@ class ProjectDeliverableTests(unittest.TestCase):
                 "deliverables",
                 "deliverable_revisions",
                 "deliverable_status_transitions",
+                "revision_acceptance_references",
             ):
                 table_exists = connection.execute(
                     "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
@@ -265,6 +303,373 @@ class ProjectDeliverableTests(unittest.TestCase):
                     table_exists,
                     f"{table_name} 数据表不存在",
                 )
+
+    def test_change_control_tables_exist(self):
+        with server.db() as connection:
+            for table_name in (
+                "deliverable_change_requests",
+                "deliverable_change_events",
+            ):
+                self.assertIsNotNone(
+                    connection.execute(
+                        "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
+                        (table_name,),
+                    ).fetchone()
+                )
+
+    def test_acceptance_reference_can_be_classified_without_agent_access(self):
+        status, category = self.post_json(
+            "/api/categories",
+            {"name": "数据库验收", "content_type": "acceptance-reference"},
+        )
+        self.assertEqual(status, 201)
+        status, reference = self.post_json(
+            "/api/contents",
+            {
+                "title": "数据库交付验收清单",
+                "type": "acceptance-reference",
+                "category_id": category["id"],
+                "body": "检查数据库能否启动，并核对说明文档。",
+                "tags": "数据库,验收",
+                "ai_access": 0,
+            },
+        )
+        self.assertEqual(status, 201)
+        self.assertEqual(reference["type"], "acceptance-reference")
+        self.assertEqual(reference["category_id"], category["id"])
+        self.assertEqual(reference["ai_access"], 0)
+
+    def test_revision_history_is_paginated_filterable_and_has_clickable_detail_data(self):
+        project, deliverable = self.create_project_with_deliverable("版本历史项目")
+        base_revision = deliverable["current_revision"]
+        created_at = server.now_iso()
+        with server.db() as connection:
+            cursor = connection.execute(
+                """
+                INSERT INTO deliverable_revisions(
+                    deliverable_id,revision_no,title,scope,acceptance_criteria,
+                    owner,approver,due_date,due_date_status,status,
+                    created_at,updated_at
+                )
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
+                """,
+                (
+                    deliverable["id"],
+                    2,
+                    "数据库和第二版说明文档",
+                    "交付数据库和说明文档",
+                    "数据库能够启动且说明文档完整",
+                    "第二版执行负责人",
+                    "项目负责人",
+                    "2026-10-08",
+                    "confirmed",
+                    "confirmed",
+                    created_at,
+                    created_at,
+                ),
+            )
+            second_revision_id = cursor.lastrowid
+            connection.execute(
+                "UPDATE deliverables SET current_revision_id=? WHERE id=?",
+                (second_revision_id, deliverable["id"]),
+            )
+
+        with urllib.request.urlopen(
+            f"{self.base_url}/api/project-overview", timeout=5
+        ) as response:
+            overview = json.loads(response.read().decode("utf-8"))
+        overview_deliverable = overview[0]["deliverables"][0]
+        self.assertEqual(overview_deliverable["revision_count"], 2)
+        self.assertNotIn("revisions", overview_deliverable)
+
+        with urllib.request.urlopen(
+            f"{self.base_url}/api/deliverables/{deliverable['id']}/revisions?limit=1&offset=0",
+            timeout=5,
+        ) as response:
+            first_page = json.loads(response.read().decode("utf-8"))
+        self.assertEqual(first_page["total"], 2)
+        self.assertEqual(len(first_page["items"]), 1)
+        self.assertTrue(first_page["has_more"])
+        self.assertEqual(first_page["items"][0]["revision_no"], 2)
+        self.assertTrue(first_page["items"][0]["is_current"])
+
+        query = urllib.parse.urlencode({"q": "第二版执行负责人", "status": "confirmed"})
+        with urllib.request.urlopen(
+            f"{self.base_url}/api/deliverables/{deliverable['id']}/revisions?{query}",
+            timeout=5,
+        ) as response:
+            filtered = json.loads(response.read().decode("utf-8"))
+        self.assertEqual(filtered["total"], 1)
+        self.assertEqual(filtered["items"][0]["id"], second_revision_id)
+
+        with urllib.request.urlopen(
+            f"{self.base_url}/api/deliverable-revisions/{second_revision_id}",
+            timeout=5,
+        ) as response:
+            detail = json.loads(response.read().decode("utf-8"))
+        self.assertEqual(detail["previous_revision"]["id"], base_revision["id"])
+        self.assertEqual(detail["revision"]["project_id"], project["id"])
+        self.assertTrue(detail["revision"]["is_current"])
+        self.assertIn(
+            "owner",
+            {change["field"] for change in detail["changed_fields"]},
+        )
+
+    def test_change_request_acceptance_creates_traceable_revision_and_report(self):
+        project, deliverable = self.create_project_with_deliverable()
+        base_revision = deliverable["current_revision"]
+
+        status, proposed = self.post_json(
+            f"/api/deliverables/{deliverable['id']}/change-requests",
+            {
+                "actor": "执行负责人",
+                "reason": "检查反馈增加说明文档并调整期限",
+                "base_revision_id": base_revision["id"],
+                "proposed_fields": {
+                    "scope": "交付数据库和说明文档",
+                    "acceptance_criteria": "数据库能够启动且说明文档与结构一致",
+                    "due_date": "2026-10-08",
+                },
+                "impact_analysis": [
+                    {
+                        "deliverable_id": deliverable["id"],
+                        "impact_types": ["scope", "schedule", "acceptance"],
+                        "description": "新增说明文档并延后验收",
+                        "origin": "manual",
+                    }
+                ],
+                "acceptance_items": [
+                    {
+                        "text": "数据库能够启动",
+                        "status": "satisfied",
+                        "evidence": "健康检查通过",
+                    },
+                    {
+                        "text": "说明文档与数据库结构一致",
+                        "status": "pending",
+                        "evidence": "",
+                    },
+                ],
+            },
+        )
+
+        self.assertEqual(status, 201, proposed)
+        self.assertEqual(proposed["status"], "proposed")
+        self.assertEqual(proposed["base_revision_id"], base_revision["id"])
+        self.assertEqual(
+            {item["field"] for item in proposed["changed_fields"]},
+            {"scope", "acceptance_criteria", "due_date"},
+        )
+        with server.db() as connection:
+            self.assertEqual(
+                connection.execute(
+                    "SELECT COUNT(*) FROM deliverable_revisions WHERE deliverable_id=?",
+                    (deliverable["id"],),
+                ).fetchone()[0],
+                1,
+            )
+
+        status, accepted = self.post_json(
+            f"/api/change-requests/{proposed['id']}/decision",
+            {
+                "decision": "accepted",
+                "actor": "项目负责人",
+                "reason": "影响和验收要求已经确认",
+            },
+        )
+
+        self.assertEqual(status, 201, accepted)
+        self.assertEqual(accepted["status"], "accepted")
+        self.assertEqual(accepted["created_revision"]["revision_no"], 2)
+        self.assertEqual(
+            accepted["created_revision"]["acceptance_criteria"],
+            "数据库能够启动且说明文档与结构一致",
+        )
+        self.assertEqual(len(accepted["acceptance_items"]), 2)
+        self.assertEqual(accepted["impact_analysis"][0]["deliverable_title"], "数据库和说明文档")
+        self.assertEqual(
+            [event["event_type"] for event in accepted["events"]],
+            ["proposed", "accepted"],
+        )
+        with server.db() as connection:
+            revisions = connection.execute(
+                "SELECT id,revision_no,scope FROM deliverable_revisions "
+                "WHERE deliverable_id=? ORDER BY revision_no",
+                (deliverable["id"],),
+            ).fetchall()
+            current_revision_id = connection.execute(
+                "SELECT current_revision_id FROM deliverables WHERE id=?",
+                (deliverable["id"],),
+            ).fetchone()[0]
+        self.assertEqual(len(revisions), 2)
+        self.assertEqual(revisions[0]["scope"], "交付数据库")
+        self.assertEqual(revisions[1]["scope"], "交付数据库和说明文档")
+        self.assertEqual(current_revision_id, revisions[1]["id"])
+
+        with urllib.request.urlopen(
+            f"{self.base_url}/api/change-requests/{proposed['id']}/report",
+            timeout=5,
+        ) as response:
+            report = json.loads(response.read().decode("utf-8"))
+        self.assertEqual(report["project_name"], project["current_cycle"]["name"])
+        self.assertEqual(report["base_revision"]["revision_no"], 1)
+        self.assertEqual(report["created_revision"]["revision_no"], 2)
+
+    def test_rejected_change_request_preserves_formal_revisions(self):
+        _, deliverable = self.create_project_with_deliverable("拒绝变更项目")
+        status, proposed = self.post_json(
+            f"/api/deliverables/{deliverable['id']}/change-requests",
+            {
+                "actor": "执行负责人",
+                "reason": "有人建议延期",
+                "proposed_fields": {"due_date": "2026-10-20"},
+                "acceptance_items": [
+                    {"text": "数据库能够启动", "status": "pending"}
+                ],
+            },
+        )
+        self.assertEqual(status, 201, proposed)
+        status, rejected = self.post_json(
+            f"/api/change-requests/{proposed['id']}/decision",
+            {
+                "decision": "rejected",
+                "actor": "项目负责人",
+                "reason": "延期没有依据",
+            },
+        )
+        self.assertEqual(status, 201, rejected)
+        self.assertEqual(rejected["status"], "rejected")
+        self.assertIsNone(rejected["created_revision"])
+        with server.db() as connection:
+            self.assertEqual(
+                connection.execute(
+                    "SELECT COUNT(*) FROM deliverable_revisions WHERE deliverable_id=?",
+                    (deliverable["id"],),
+                ).fetchone()[0],
+                1,
+            )
+            self.assertEqual(
+                connection.execute(
+                    "SELECT COUNT(*) FROM deliverable_change_events WHERE change_request_id=?",
+                    (proposed["id"],),
+                ).fetchone()[0],
+                2,
+            )
+
+    def test_stale_change_request_cannot_overwrite_new_current_revision(self):
+        _, deliverable = self.create_project_with_deliverable("并发变更项目")
+        proposals = []
+        for due_date in ("2026-10-08", "2026-10-20"):
+            status, proposal = self.post_json(
+                f"/api/deliverables/{deliverable['id']}/change-requests",
+                {
+                    "actor": "执行负责人",
+                    "reason": f"建议改为{due_date}",
+                    "proposed_fields": {"due_date": due_date},
+                    "acceptance_items": [
+                        {"text": "确认新的交付时间", "status": "pending"}
+                    ],
+                },
+            )
+            self.assertEqual(status, 201, proposal)
+            proposals.append(proposal)
+        status, _ = self.post_json(
+            f"/api/change-requests/{proposals[0]['id']}/decision",
+            {
+                "decision": "accepted",
+                "actor": "项目负责人",
+                "reason": "采用第一项变更",
+            },
+        )
+        self.assertEqual(status, 201)
+        status, payload = self.post_json(
+            f"/api/change-requests/{proposals[1]['id']}/decision",
+            {
+                "decision": "accepted",
+                "actor": "项目负责人",
+                "reason": "错误地采用过期变更",
+            },
+        )
+        self.assertEqual(status, 409, payload)
+        self.assertIn("最新版", payload["error"])
+        with server.db() as connection:
+            self.assertEqual(
+                connection.execute(
+                    "SELECT COUNT(*) FROM deliverable_revisions WHERE deliverable_id=?",
+                    (deliverable["id"],),
+                ).fetchone()[0],
+                2,
+            )
+
+    def test_only_project_owner_can_accept_change_request(self):
+        _, deliverable = self.create_project_with_deliverable("变更权限项目")
+        status, proposed = self.post_json(
+            f"/api/deliverables/{deliverable['id']}/change-requests",
+            {
+                "actor": "执行负责人",
+                "reason": "建议修改验收标准",
+                "proposed_fields": {"acceptance_criteria": "数据库和说明文档一致"},
+                "acceptance_items": [
+                    {"text": "数据库和说明文档一致", "status": "pending"}
+                ],
+            },
+        )
+        self.assertEqual(status, 201, proposed)
+        status, payload = self.post_json(
+            f"/api/change-requests/{proposed['id']}/decision",
+            {
+                "decision": "accepted",
+                "actor": "执行负责人",
+                "reason": "越权接受",
+            },
+        )
+        self.assertEqual(status, 403, payload)
+        with server.db() as connection:
+            self.assertEqual(
+                connection.execute(
+                    "SELECT status FROM deliverable_change_requests WHERE id=?",
+                    (proposed["id"],),
+                ).fetchone()[0],
+                "proposed",
+            )
+            self.assertEqual(
+                connection.execute(
+                    "SELECT COUNT(*) FROM deliverable_revisions WHERE deliverable_id=?",
+                    (deliverable["id"],),
+                ).fetchone()[0],
+                1,
+            )
+
+    def test_change_impact_cannot_reference_another_project(self):
+        _, first = self.create_project_with_deliverable("影响范围项目一")
+        _, second = self.create_project_with_deliverable("影响范围项目二")
+        status, payload = self.post_json(
+            f"/api/deliverables/{first['id']}/change-requests",
+            {
+                "actor": "项目负责人",
+                "reason": "尝试跨项目扩大影响范围",
+                "proposed_fields": {"scope": "新的交付范围"},
+                "impact_analysis": [
+                    {
+                        "deliverable_id": second["id"],
+                        "impact_types": ["scope"],
+                        "description": "错误关联",
+                    }
+                ],
+                "acceptance_items": [
+                    {"text": "确认范围", "status": "pending"}
+                ],
+            },
+        )
+        self.assertEqual(status, 400, payload)
+        self.assertIn("不属于当前项目", payload["error"])
+        with server.db() as connection:
+            self.assertEqual(
+                connection.execute(
+                    "SELECT COUNT(*) FROM deliverable_change_requests"
+                ).fetchone()[0],
+                0,
+            )
 
     def test_owner_rejects_candidate_without_business_writes(self):
         # 只测试人工审查边界；直接准备已通过基础校验的候选。
@@ -360,18 +765,113 @@ class ProjectDeliverableTests(unittest.TestCase):
             history = json.load(response)
 
         self.assertEqual(response.status, 200)
-        self.assertEqual(len(history), 1)
-        self.assertEqual(history[0]["candidate_result_id"], result_id)
-        self.assertEqual(history[0]["project"]["name"], "历史查看项目")
-        self.assertEqual(history[0]["review"]["decision"], "rejected")
-        self.assertEqual(history[0]["review"]["reason"], "交付日期仍需确认")
-        self.assertEqual(history[0]["outputs"], [])
+        self.assertEqual(history["total"], 1)
+        self.assertEqual(len(history["items"]), 1)
+        summary = history["items"][0]
+        self.assertEqual(summary["project"]["name"], "历史查看项目")
+        self.assertEqual(summary["review"]["decision"], "rejected")
+        with urllib.request.urlopen(
+            f"{self.base_url}/api/agent-candidate-reviews/{summary['review']['id']}",
+            timeout=5,
+        ) as response:
+            detail = json.load(response)
+        self.assertEqual(detail["candidate_result_id"], result_id)
+        self.assertEqual(detail["review"]["reason"], "交付日期仍需确认")
+        self.assertEqual(detail["outputs"], [])
         with server.db() as connection:
             for table, count in before.items():
                 self.assertEqual(
                     connection.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0],
                     count,
                 )
+
+    def test_upload_source_preserves_original_and_extracted_text(self):
+        raw = "阶段成果：上传文件测试。\n交付时间：2026-10-08。".encode("utf-8")
+        status, item = self.post_json(
+            "/api/contents/upload",
+            {
+                "name": "项目要求.txt",
+                "title": "上传的项目要求",
+                "content_base64": base64.b64encode(raw).decode("ascii"),
+                "type": "knowledge",
+            },
+        )
+
+        self.assertEqual(status, 201, item)
+        self.assertEqual(item["source"], "file-upload")
+        self.assertIn("阶段成果：上传文件测试", item["body"])
+        self.assertEqual(item["attached_file"]["original_name"], "项目要求.txt")
+        with urllib.request.urlopen(
+            f"{self.base_url}/api/contents/{item['id']}/file", timeout=5
+        ) as response:
+            self.assertEqual(response.read(), raw)
+        with server.db() as connection:
+            self.assertEqual(
+                connection.execute(
+                    "SELECT COUNT(*) FROM agent_job_allowed_sources WHERE source_id=?",
+                    (item["id"],),
+                ).fetchone()[0],
+                0,
+            )
+
+    def test_markdown_db_path_uses_logical_app_storage_path(self):
+        logical_root = Path("C:/Users/test/AppData/Local/Finto/content")
+        target = logical_root / "Knowledge" / "项目要求.md"
+        with mock.patch.object(server, "CONTENT_ROOT", logical_root), mock.patch.object(
+            Path,
+            "resolve",
+            side_effect=AssertionError("markdown_db_path must not resolve redirected paths"),
+        ):
+            self.assertEqual(
+                server.markdown_db_path(target),
+                "content/Knowledge/项目要求.md",
+            )
+
+    def test_review_history_is_paginated_and_filterable(self):
+        created = server.now_iso()
+        with server.db() as connection:
+            project_id = connection.execute(
+                "INSERT INTO projects(status,created_at,updated_at) VALUES ('active',?,?)",
+                (created, created),
+            ).lastrowid
+            cycle_id = connection.execute(
+                "INSERT INTO project_cycles(project_id,cycle_no,name,owner,started_at) VALUES (?,1,'分页项目','负责人',?)",
+                (project_id, created),
+            ).lastrowid
+            connection.execute(
+                "UPDATE projects SET current_cycle_id=? WHERE id=?",
+                (cycle_id, project_id),
+            )
+            for index in range(21):
+                job_id = connection.execute(
+                    "INSERT INTO agent_jobs(project_id,action,status,request_json,created_at,updated_at) VALUES (?,'extract_deliverables','rejected','{}',?,?)",
+                    (project_id, created, created),
+                ).lastrowid
+                result_id = connection.execute(
+                    "INSERT INTO agent_candidate_results(agent_job_id,validation_status,result_json,created_at) VALUES (?,'valid','{\"candidates\":[]}',?)",
+                    (job_id, created),
+                ).lastrowid
+                connection.execute(
+                    "INSERT INTO agent_candidate_reviews(candidate_result_id,decision,actor,actor_role,reason,reviewed_result_json,created_at) VALUES (?,'rejected','负责人','project_owner',?,'{}',?)",
+                    (result_id, f"拒绝 {index}", created),
+                )
+
+        with urllib.request.urlopen(
+            f"{self.base_url}/api/agent-candidate-results/history?project_id={project_id}&decision=rejected&limit=20&offset=0",
+            timeout=5,
+        ) as response:
+            first_page = json.load(response)
+        with urllib.request.urlopen(
+            f"{self.base_url}/api/agent-candidate-results/history?project_id={project_id}&decision=rejected&limit=20&offset=20",
+            timeout=5,
+        ) as response:
+            second_page = json.load(response)
+
+        self.assertEqual(first_page["total"], 21)
+        self.assertEqual(len(first_page["items"]), 20)
+        self.assertTrue(first_page["has_more"])
+        self.assertEqual(len(second_page["items"]), 1)
+        self.assertFalse(second_page["has_more"])
 
     def test_create_project_with_initial_cycle(self):
         # Arrange: prepare the minimum fields for a new project.
@@ -1445,6 +1945,20 @@ class ProjectDeliverableTests(unittest.TestCase):
                 """,
                 (created_at, created_at),
             )
+            connection.execute(
+                """
+                INSERT INTO contents(
+                    id,title,type,category,tags,source,markdown_path,body,
+                    ai_access,deleted_at,created_at,updated_at
+                )
+                VALUES (
+                    13,'数据库交付验收清单','acceptance-reference',
+                    '数据库','','manual','content/acceptance-reference-13.md',
+                    '检查数据库能否启动，并核对说明文档。',0,'',?,?
+                )
+                """,
+                (created_at, created_at),
+            )
 
         agent_job_request = urllib.request.Request(
             f"{self.base_url}/api/projects/{project['id']}/agent-jobs",
@@ -1539,6 +2053,7 @@ class ProjectDeliverableTests(unittest.TestCase):
                         "approver": "项目负责人",
                         "due_date_status": "confirmed",
                         "is_required": True,
+                        "acceptance_reference_ids": [13],
                     },
                 },
                 ensure_ascii=False,
@@ -1627,6 +2142,14 @@ class ProjectDeliverableTests(unittest.TestCase):
                 """,
                 (agent_job["id"],),
             ).fetchone()[0]
+            linked_reference = connection.execute(
+                """
+                SELECT content_id,linked_by
+                FROM revision_acceptance_references
+                WHERE revision_id=?
+                """,
+                (revision["id"],),
+            ).fetchone()
             deliverable_count_after = connection.execute(
                 "SELECT COUNT(*) FROM deliverables"
             ).fetchone()[0]
@@ -1660,11 +2183,22 @@ class ProjectDeliverableTests(unittest.TestCase):
         self.assertEqual(revision["due_date_status"], "confirmed")
         self.assertEqual(revision["status"], "draft")
         self.assertEqual(allowed_source_count, 1)
+        self.assertEqual(linked_reference["content_id"], 13)
+        self.assertEqual(linked_reference["linked_by"], "项目负责人")
         self.assertEqual(
             deliverable_count_after,
             deliverable_count_before + 1,
         )
         self.assertEqual(revision_count_after, revision_count_before + 1)
+        with urllib.request.urlopen(
+            f"{self.base_url}/api/deliverable-revisions/{revision['id']}",
+            timeout=5,
+        ) as response:
+            revision_detail = json.loads(response.read().decode("utf-8"))
+        self.assertEqual(
+            revision_detail["acceptance_references"][0]["title"],
+            "数据库交付验收清单",
+        )
 
     def test_review_rejects_duplicate_deliverable_title_across_agent_jobs(self):
         # Arrange：两个不同AgentJob为同一项目生成同名合法候选。
@@ -3935,6 +4469,37 @@ class ProjectDeliverableTests(unittest.TestCase):
             all(unknown["checked_source_ids"] == [12] for unknown in result["unknowns"])
         )
 
+    def test_deterministic_extraction_handles_county_notice_without_guessing_city_date(self):
+        result = server.deterministic_extract_deliverables(
+            [
+                {
+                    "id": 9,
+                    "body": (
+                        "县级成果报送时间为9月7日-11日（具体安排详见附件1）。\n"
+                        "报送资料包括整改后的各专题成果报告、图件、数据库及成果验收报告。\n"
+                        "本次审核仅接收电子版资料，成果报告报送Word版和PDF版，"
+                        "图件报送jpg格式，审核无误后共同签字确认。"
+                    ),
+                }
+            ]
+        )
+
+        self.assertEqual(result["used_source_ids"], [9])
+        self.assertEqual(len(result["candidates"]), 1)
+        candidate = result["candidates"][0]
+        self.assertEqual(candidate["title"], "县级成果审核资料")
+        self.assertIsNone(candidate["due_at"])
+        self.assertIn("仅接收电子版资料", candidate["acceptance_criteria"])
+        self.assertEqual(
+            [item["candidate_field"] for item in candidate["evidence"]],
+            ["title", "acceptance_criteria"],
+        )
+        due_unknown = next(
+            item for item in result["unknowns"] if item["field"] == "due_at"
+        )
+        self.assertIn("9月7日-11日", due_unknown["reason"])
+        self.assertIn("汉中市具体日期需核对附件1", due_unknown["reason"])
+
 
 class AgentReviewAssetTests(unittest.TestCase):
     def test_agent_review_page_wires_pending_review_and_merge_action(self):
@@ -3954,10 +4519,26 @@ class AgentReviewAssetTests(unittest.TestCase):
         self.assertIn("source_candidate_indexes:indexes", javascript)
         self.assertIn('id="reviewTargetDeliverable"', javascript)
         self.assertIn('id="reviewedAcceptanceCriteria"', javascript)
+        self.assertIn(
+            '执行负责人（可修改）<input id="reviewedOwner" required autocomplete="off"',
+            javascript,
+        )
+        self.assertNotIn('id="reviewedOwner" disabled', javascript)
+        self.assertNotIn('id="reviewedOwner" readonly', javascript)
+        self.assertIn("提交前核对", javascript)
+        self.assertIn('class="review-preview-heading"', javascript)
+        self.assertIn("本次会改变什么", javascript)
+        self.assertIn('class="review-final-fields"', javascript)
+        self.assertIn(".review-preview-heading", css)
         self.assertIn("target_deliverable_id", javascript)
         self.assertIn('id="taskExecutionMode"', html)
         self.assertIn("execution_mode:executionMode", project_javascript)
         self.assertIn("版本历史", project_javascript)
+        self.assertIn("/api/deliverables/${deliverableId}/revisions?", project_javascript)
+        self.assertIn("/api/deliverable-revisions/${revisionId}", project_javascript)
+        self.assertIn('data-open-revision="${revision.id}"', project_javascript)
+        self.assertIn('id="revisionDetailDialog"', html)
+        self.assertIn("继续加载", project_javascript)
         self.assertLess(
             html.index('id="projectChoice"'),
             html.index('id="projectAgentForm"'),
@@ -3979,6 +4560,12 @@ class AgentReviewAssetTests(unittest.TestCase):
         self.assertIn(".created-deliverable-notice", styles)
         self.assertIn(".review-write-preview", styles)
         self.assertIn(".agent-review-shell", css)
+        self.assertIn('data-filter="acceptance-reference"', html)
+        self.assertIn('id="acceptanceReferenceDialog"', html)
+        self.assertIn('id="acceptanceReferenceCategory"', html)
+        self.assertIn('data-acceptance-reference', javascript)
+        self.assertIn("acceptance_reference_ids", javascript)
+        self.assertIn("不会加入 AgentJob 授权", javascript)
 
     def test_deliverable_list_explains_and_wires_draft_confirmation(self):
         project_javascript = (server.WEB_ROOT / "project-overview.js").read_text(
@@ -3986,9 +4573,13 @@ class AgentReviewAssetTests(unittest.TestCase):
         )
 
         # 用户验证要求：draft不能只显示技术状态；页面必须告诉用户
-        # 当前仍待谁确认、下一步做什么，并提供已有状态流转接口的入口。
+        # 当前仍待谁确认、下一步做什么，并提供已有状态流转接口的入口；
+        # 文案不得把单机确认误写成已经完成多人任务交接。
         self.assertIn("待负责人确认", project_javascript)
-        self.assertIn("确认草稿并交给执行负责人", project_javascript)
+        self.assertIn("确认交付计划", project_javascript)
+        self.assertIn("确认后作为本机交付计划保存", project_javascript)
+        self.assertIn("Finto 当前不提供任务接收或多人协作", project_javascript)
+        self.assertNotIn("确认草稿并交给执行负责人", project_javascript)
         self.assertIn("confirmDraftRevision", project_javascript)
         self.assertIn(
             "/api/deliverable-revisions/${item.current_revision_id}/transitions",
@@ -4060,13 +4651,13 @@ class AgentReviewAssetTests(unittest.TestCase):
             "截止日期",
             "验收标准",
             "交付范围",
-            "交付负责人",
+            "执行负责人",
             "验收负责人",
             "审查说明",
         ):
             self.assertIn(f'recordChange("{label}"', javascript)
-        self.assertIn("采纳方式", javascript)
-        self.assertIn("与自动填充相比", javascript)
+        self.assertIn("提交后将", javascript)
+        self.assertIn("本次会改变什么", javascript)
         self.assertIn("最终写入内容", javascript)
         self.assertIn("是否必交", javascript)
         self.assertIn("日期状态", javascript)
@@ -4099,30 +4690,86 @@ class AgentReviewAssetTests(unittest.TestCase):
         project_javascript = (server.WEB_ROOT / "project-overview.js").read_text(
             encoding="utf-8"
         )
+        javascript = (server.WEB_ROOT / "app.js").read_text(encoding="utf-8")
         styles = (server.WEB_ROOT / "styles.css").read_text(encoding="utf-8")
 
-        # 真实行为证据：资料保存、项目范围和一次任务授权之间的顺序
-        # 必须在项目页直接可见；“允许AI使用”不能被解释成已经授权。
+        # 真实行为证据：主路径只保留每次都必须完成的动作；添加资料
+        # 降级为选择资料时的辅助入口，避免用户误以为每次都要重新上传。
         self.assertIn('id="projectDeliveryPath"', html)
         for text in (
+            "完成一次验收要求整理",
             "1. 创建或选择项目",
-            "2. 添加新资料（可选）",
-            "3. 勾选本次授权资料",
-            "4. 运行并进入待审",
-            "保存到资料库不会自动授权给任务",
-            "已有合适资料可直接跳到第3步",
+            "2. 选择本次使用的资料",
+            "3. 运行、核对并保留版本",
+            "这是单机本地受控工具",
         ):
             self.assertIn(text, html)
+        self.assertNotIn("按这四步完成一次交付整理", html)
+        self.assertNotIn("添加新资料（可选）", html)
+        self.assertNotIn("已有合适资料可直接跳到第3步", html)
         self.assertIn('id="openProjectSource"', html)
-        self.assertIn(">添加新资料</button>", html)
+        self.assertIn(">添加资料</button>", html)
+        self.assertIn('id="taskSourceCount"', html)
+        self.assertIn('id="taskSourcePicker"', html)
+        self.assertIn('id="selectedTaskSources"', html)
         self.assertIn("function updateProjectDeliveryPath", project_javascript)
-        self.assertIn("[data-task-source]:checked:not(:disabled)", project_javascript)
-        self.assertIn("已有合适资料可直接跳到第3步", project_javascript)
-        self.assertIn("也可以暂不添加", project_javascript)
+        self.assertIn("const selectedTaskSourceIds = new Set()", project_javascript)
+        self.assertIn("data-remove-task-source", project_javascript)
+        self.assertNotIn('type="checkbox" data-task-source', project_javascript)
         self.assertIn("已选择 ${selectedCount} 份资料", project_javascript)
-        self.assertIn("任务只会读取本次勾选的资料", project_javascript)
-        self.assertIn("#taskSourceChoices", project_javascript)
-        self.assertIn(".project-path-step.optional", styles)
+        self.assertIn("任务只会读取本次加入的资料", project_javascript)
+        self.assertIn("资料库 ${availableCount}", project_javascript)
+        self.assertIn("#taskSourcePicker", project_javascript)
+        self.assertIn(".task-source-picker", styles)
+        self.assertIn("repeat(3,minmax(0,1fr))", styles)
+        self.assertIn(".source-helper", styles)
+
+        # 顶部添加入口只在资料库显示，不在交付清单和待审页面抢占主操作。
+        self.assertIn('id="globalAddSource"', html)
+        self.assertIn('hidden><span>＋</span>添加资料', html)
+        self.assertIn('hidden=view!=="library"', javascript)
+
+        # 交付清单压缩为六列；验收标准作为成果摘要，窄屏改为卡片，
+        # 不再依赖横向滚动查看负责人、期限和状态。
+        self.assertIn("function deliverableTable", project_javascript)
+        self.assertIn("['成果','版本','负责人','期限','状态','操作']", project_javascript)
+        self.assertIn('class="deliverable-acceptance"', project_javascript)
+        self.assertIn("table-layout:fixed", styles)
+        self.assertIn(".deliverable-table thead{display:none}", styles)
+
+    def test_product_positioning_and_real_validation_boundaries_are_explicit(self):
+        html = (server.WEB_ROOT / "index.html").read_text(encoding="utf-8")
+        replay = (
+            server.ROOT
+            / "product-docs"
+            / "Finto土壤三普历史案例回放方案.md"
+        ).read_text(encoding="utf-8")
+        validation = (
+            server.ROOT / "product-docs" / "Finto一页POC方案.md"
+        ).read_text(encoding="utf-8")
+
+        for text in ("验收与变更追踪", "单机本地受控工具", "专家反馈"):
+            self.assertIn(text, html)
+        for text in (
+            "简化子案例执行结果",
+            "Source #10",
+            "Revision #5",
+            "Revision #6",
+            "26 分 06 秒",
+            "不能证明全部要求提取覆盖率",
+            "相对人工的效率提升",
+        ):
+            self.assertIn(text, replay)
+        for text in (
+            "1 个已完成的去标识化历史子案例",
+            "Source #10",
+            "Revision #5",
+            "Revision #6",
+            "26 分 06 秒",
+            "不能声称效率提升",
+        ):
+            self.assertIn(text, validation)
+        self.assertIn("不是外部用户试点", validation)
 
     def test_project_page_explains_when_each_execution_mode_should_be_used(self):
         html = (server.WEB_ROOT / "index.html").read_text(encoding="utf-8")
@@ -4163,6 +4810,38 @@ class AgentReviewAssetTests(unittest.TestCase):
         self.assertIn("先运行整理任务并审查候选", project_javascript)
         self.assertIn("openSelectedProjectReview", project_javascript)
         self.assertNotIn("openProjectReview').disabled=!pending", project_javascript)
+
+    def test_change_control_ui_wires_proposal_decision_and_printable_report(self):
+        html = (server.WEB_ROOT / "index.html").read_text(encoding="utf-8")
+        javascript = (server.WEB_ROOT / "project-overview.js").read_text(
+            encoding="utf-8"
+        )
+        report_html = (server.WEB_ROOT / "change-report.html").read_text(
+            encoding="utf-8"
+        )
+        report_javascript = (server.WEB_ROOT / "change-report.js").read_text(
+            encoding="utf-8"
+        )
+
+        for element_id in (
+            "changeRequestDialog",
+            "changeDiffPreview",
+            "changeImpactTypes",
+            "changeAffectedDeliverables",
+            "changeAcceptanceItems",
+            "changeEvidenceSources",
+            "rejectChangeRequest",
+        ):
+            self.assertIn(f'id="{element_id}"', html)
+        self.assertIn("data-open-change", javascript)
+        self.assertIn("data-decide-change", javascript)
+        self.assertIn("/api/deliverables/${deliverableId}/change-requests", javascript)
+        self.assertIn("/api/change-requests/${requestId}/decision", javascript)
+        self.assertIn("change-report.html?id=", javascript)
+        self.assertIn("打印 / 另存为 PDF", report_html)
+        self.assertIn("/api/change-requests/${id}/report", report_javascript)
+        self.assertIn("修改前", report_javascript)
+        self.assertIn("新版本验收清单", report_javascript)
 
 
 if __name__ == "__main__":

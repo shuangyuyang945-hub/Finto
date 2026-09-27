@@ -1,0 +1,34 @@
+.change-request-modal {
+  width: min(860px, calc(100% - 28px));
+  max-height: 92vh;
+}
+.change-request-modal form { max-height: 92vh; overflow: auto; }
+.change-fieldset { margin: 0; padding: 14px; border: 1px solid var(--line); border-radius: 13px; }
+.change-fieldset legend { padding: 0 7px; color: var(--green); font-size: 12px; font-weight: 750; }
+.change-check-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; margin-bottom: 12px; }
+.change-check-grid label, .change-check-list label { display: flex; align-items: center; gap: 8px; padding: 9px; border-radius: 9px; background: #f5f1e8; font-size: 11px; }
+.change-check-grid input, .change-check-list input { width: auto; }
+.change-check-list { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+.acceptance-item-list { display: grid; gap: 9px; margin-bottom: 10px; }
+.acceptance-item-row { display: grid; grid-template-columns: minmax(180px, 1.4fr) minmax(120px, .55fr) minmax(180px, 1fr) auto; gap: 8px; align-items: end; }
+.acceptance-item-row button { min-height: 42px; }
+.change-diff-preview { display: none; padding: 13px; border: 1px solid #b9c9bd; border-radius: 12px; background: #f1f6f2; }
+.change-diff-preview.visible { display: block; }
+.change-diff-preview h3 { margin: 0 0 9px; font-size: 13px; }
+.change-diff-preview ul { margin: 0; padding-left: 18px; }
+.change-diff-preview li { margin: 5px 0; color: var(--muted); font-size: 11px; }
+.change-diff-preview strong { color: var(--ink); }
+.change-request-card { margin: 0 0 14px; padding: 16px; border: 1px solid #d7b18e; border-radius: 13px; background: #fff7eb; }
+.change-request-card.accepted { border-color: #a8bfaf; background: #edf5ef; }
+.change-request-card.rejected { border-color: #d8b7b1; background: #fbefed; }
+.change-request-card header { display: flex; justify-content: space-between; gap: 14px; }
+.change-request-card h4 { margin: 0; font-size: 14px; }
+.change-request-card p { margin: 7px 0; color: var(--muted); font-size: 11px; line-height: 1.6; }
+.change-request-card .change-actions { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 11px; }
+.change-request-card .change-actions button { min-height: 36px; padding: 0 12px; font-size: 11px; }
+.change-summary-list { display: flex; gap: 6px; flex-wrap: wrap; }
+.change-summary-list span { padding: 5px 8px; border-radius: 99px; background: rgba(255,255,255,.72); font-size: 10px; }
+.deliverable-change-button { min-height: 34px; padding: 0 11px; border: 1px solid var(--line); border-radius: 9px; background: #edf5ef; color: var(--green); cursor: pointer; white-space: nowrap; }
+@media (max-width: 760px) {
+  .change-check-grid, .change-check-list, .acceptance-item-row { grid-template-columns: 1fr; }
+}

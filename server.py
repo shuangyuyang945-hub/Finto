@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import argparse
+import base64
+import binascii
 import hashlib
+import io
 import json
 import mimetypes
 import os
@@ -14,13 +17,14 @@ import urllib.error
 import urllib.request
 import uuid
 import zipfile
+import xml.etree.ElementTree as ET
 from contextlib import contextmanager
 from datetime import date, datetime
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, Iterator
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, quote, urlparse
 
 
 ROOT = Path(__file__).resolve().parent
@@ -28,12 +32,15 @@ WEB_ROOT = ROOT / "web"
 APP_DATA_ROOT = ROOT
 DATA_ROOT = APP_DATA_ROOT / "data"
 CONTENT_ROOT = APP_DATA_ROOT / "content"
+UPLOAD_ROOT = APP_DATA_ROOT / "uploads"
 BACKUP_ROOT = APP_DATA_ROOT / "backups"
 LOG_ROOT = APP_DATA_ROOT / "logs"
 ERROR_LOG_PATH = LOG_ROOT / "finto-error.log"
 DB_PATH = DATA_ROOT / "knowledge.db"
 APP_VERSION = (ROOT / "VERSION").read_text(encoding="utf-8").strip() if (ROOT / "VERSION").is_file() else "0.4.0"
-SCHEMA_VERSION = 10
+SCHEMA_VERSION = 13
+MAX_UPLOAD_BYTES = 10 * 1024 * 1024
+UPLOAD_EXTENSIONS = {".pdf", ".docx", ".xlsx", ".csv", ".txt", ".md", ".markdown"}
 AGENT_PROMPT_VERSION = "extract_deliverables.v1"
 DETERMINISTIC_RULES_VERSION = "extract_deliverables.rules.v1"
 RELEASE_CHANNEL_PATH = ROOT / "release-channel.json"
@@ -46,6 +53,7 @@ TYPE_FOLDERS = {
     "journal": "Journal",
     "project": "Projects",
     "chat-note": "Chat Notes",
+    "acceptance-reference": "Acceptance References",
 }
 
 BOOK_TEMPLATE = """# {title}
@@ -90,8 +98,15 @@ def deterministic_extract_deliverables(source_rows: list[sqlite3.Row]) -> dict[s
     for source in source_rows:
         values: dict[str, str] = {}
         evidence = []
-        for line_number, raw_line in enumerate(source["body"].splitlines(), start=1):
-            line = raw_line.strip()
+        source_lines = [
+            (line_number, raw_line.strip())
+            for line_number, raw_line in enumerate(
+                source["body"].splitlines(),
+                start=1,
+            )
+            if raw_line.strip()
+        ]
+        for line_number, line in source_lines:
             match = re.fullmatch(
                 r"(?:[-*]\s*)?(阶段成果|交付时间|验收要求)\s*[：:]\s*(.+)",
                 line,
@@ -122,6 +137,77 @@ def deterministic_extract_deliverables(source_rows: list[sqlite3.Row]) -> dict[s
                     "candidate_field": field,
                 }
             )
+
+        # Common public-notice wording is still deterministic: only extract
+        # phrases that match explicit business expressions and keep a city-
+        # specific date unknown when the referenced schedule is absent.
+        if not evidence:
+            material_line = next(
+                (
+                    (line_number, line)
+                    for line_number, line in source_lines
+                    if "报送资料包括" in line
+                ),
+                None,
+            )
+            requirement_line = next(
+                (
+                    (line_number, line)
+                    for line_number, line in source_lines
+                    if "本次审核仅接收电子版资料" in line
+                ),
+                None,
+            )
+            schedule_line = next(
+                (
+                    (line_number, line)
+                    for line_number, line in source_lines
+                    if "县级成果报送时间" in line
+                ),
+                None,
+            )
+            if material_line and "县级成果" in source["body"]:
+                values["title"] = "县级成果审核资料"
+                evidence.append(
+                    {
+                        "source_id": source["id"],
+                        "source_locator": {
+                            "type": "markdown_sentence",
+                            "value": f"县级成果报送资料/第{material_line[0]}行",
+                        },
+                        "evidence_excerpt": material_line[1],
+                        "candidate_field": "title",
+                    }
+                )
+            if requirement_line:
+                values["acceptance_criteria"] = requirement_line[1]
+                evidence.append(
+                    {
+                        "source_id": source["id"],
+                        "source_locator": {
+                            "type": "markdown_sentence",
+                            "value": f"资料报送要求/第{requirement_line[0]}行",
+                        },
+                        "evidence_excerpt": requirement_line[1],
+                        "candidate_field": "acceptance_criteria",
+                    }
+                )
+            if evidence and schedule_line:
+                range_match = re.search(
+                    r"县级成果报送时间为([^（(，。]+)",
+                    schedule_line[1],
+                )
+                range_text = range_match.group(1).strip() if range_match else "一个日期区间"
+                unknowns.append(
+                    {
+                        "field": "due_at",
+                        "checked_source_ids": [source["id"]],
+                        "reason": (
+                            f"正文只给出县级成果总体报送区间{range_text}；"
+                            "汉中市具体日期需核对附件1，当前提取文本没有该明细"
+                        ),
+                    }
+                )
 
         if not evidence:
             continue
@@ -271,14 +357,171 @@ def category_descendant_ids(connection: sqlite3.Connection, category_id: int) ->
 
 
 def configure_storage(app_data_root: Path) -> None:
-    global APP_DATA_ROOT, DATA_ROOT, CONTENT_ROOT, BACKUP_ROOT, LOG_ROOT, ERROR_LOG_PATH, DB_PATH
+    global APP_DATA_ROOT, DATA_ROOT, CONTENT_ROOT, UPLOAD_ROOT, BACKUP_ROOT, LOG_ROOT, ERROR_LOG_PATH, DB_PATH
     APP_DATA_ROOT = app_data_root.expanduser().resolve()
     DATA_ROOT = APP_DATA_ROOT / "data"
     CONTENT_ROOT = APP_DATA_ROOT / "content"
+    UPLOAD_ROOT = APP_DATA_ROOT / "uploads"
     BACKUP_ROOT = APP_DATA_ROOT / "backups"
     LOG_ROOT = APP_DATA_ROOT / "logs"
     ERROR_LOG_PATH = LOG_ROOT / "finto-error.log"
     DB_PATH = DATA_ROOT / "knowledge.db"
+
+
+def decode_text_bytes(raw: bytes) -> str:
+    for encoding in ("utf-8-sig", "utf-8", "gb18030"):
+        try:
+            return raw.decode(encoding)
+        except UnicodeDecodeError:
+            continue
+    return raw.decode("utf-8", errors="replace")
+
+
+def extract_uploaded_file_text(name: str, raw: bytes) -> str:
+    suffix = Path(name).suffix.lower()
+    if suffix not in UPLOAD_EXTENSIONS:
+        raise ValueError("文件格式不受支持；请选择 PDF、DOCX、XLSX、CSV、TXT 或 Markdown")
+    if suffix in {".txt", ".md", ".markdown", ".csv"}:
+        return decode_text_bytes(raw).strip()
+    if suffix == ".docx":
+        try:
+            with zipfile.ZipFile(io.BytesIO(raw)) as archive:
+                root = ET.fromstring(archive.read("word/document.xml"))
+        except (KeyError, zipfile.BadZipFile, ET.ParseError) as exc:
+            raise ValueError("DOCX 文件损坏或无法读取") from exc
+        paragraphs = []
+        for paragraph in root.iter():
+            if paragraph.tag.endswith("}p"):
+                text = "".join(
+                    node.text or ""
+                    for node in paragraph.iter()
+                    if node.tag.endswith("}t")
+                ).strip()
+                if text:
+                    paragraphs.append(text)
+        return "\n".join(paragraphs).strip()
+    if suffix == ".xlsx":
+        try:
+            from openpyxl import load_workbook
+
+            workbook = load_workbook(io.BytesIO(raw), read_only=True, data_only=True)
+            lines = []
+            for sheet in workbook.worksheets:
+                lines.append(f"## 工作表：{sheet.title}")
+                for row in sheet.iter_rows(values_only=True):
+                    values = [str(value).strip() if value is not None else "" for value in row]
+                    if any(values):
+                        lines.append("\t".join(values).rstrip())
+            workbook.close()
+            return "\n".join(lines).strip()
+        except Exception as exc:
+            raise ValueError("XLSX 文件损坏或无法读取") from exc
+    try:
+        from pypdf import PdfReader
+
+        reader = PdfReader(io.BytesIO(raw))
+        if reader.is_encrypted:
+            raise ValueError("暂不支持加密 PDF")
+        return "\n\n".join((page.extract_text() or "").strip() for page in reader.pages).strip()
+    except ValueError:
+        raise
+    except Exception as exc:
+        raise ValueError("PDF 文件损坏、为扫描图片或无法提取文字") from exc
+
+
+def content_file_record(connection: sqlite3.Connection, content_id: int) -> dict[str, Any] | None:
+    row = connection.execute(
+        "SELECT original_name,media_type,size_bytes,sha256,created_at "
+        "FROM content_files WHERE content_id=?",
+        (content_id,),
+    ).fetchone()
+    return dict(row) if row else None
+
+
+def content_record(connection: sqlite3.Connection, row: sqlite3.Row) -> dict[str, Any]:
+    item = dict(row)
+    item["attached_file"] = content_file_record(connection, row["id"])
+    return item
+
+
+def agent_review_detail(connection: sqlite3.Connection, review_id: int) -> dict[str, Any] | None:
+    row = connection.execute(
+        """
+        SELECT review.id AS review_id,review.decision,review.actor,
+               review.actor_role,review.reason,review.reviewed_result_json,
+               review.created_at AS reviewed_at,cr.id AS candidate_result_id,
+               cr.result_json,cr.created_at AS candidate_created_at,
+               aj.id AS agent_job_id,aj.action,aj.status AS agent_job_status,
+               aj.request_json,p.id AS project_id,p.status AS project_status,
+               pc.id AS cycle_id,pc.cycle_no,pc.name AS project_name,
+               pc.owner AS project_owner
+        FROM agent_candidate_reviews AS review
+        JOIN agent_candidate_results AS cr ON cr.id=review.candidate_result_id
+        JOIN agent_jobs AS aj ON aj.id=cr.agent_job_id
+        JOIN projects AS p ON p.id=aj.project_id
+        LEFT JOIN project_cycles AS pc ON pc.id=p.current_cycle_id
+        WHERE review.id=?
+        """,
+        (review_id,),
+    ).fetchone()
+    if not row:
+        return None
+    allowed_sources = [
+        dict(source)
+        for source in connection.execute(
+            """
+            SELECT c.id,c.title,c.ai_access
+            FROM agent_job_allowed_sources AS allowed
+            JOIN contents AS c ON c.id=allowed.source_id
+            WHERE allowed.agent_job_id=? ORDER BY c.id
+            """,
+            (row["agent_job_id"],),
+        )
+    ]
+    outputs = [
+        dict(output)
+        for output in connection.execute(
+            """
+            SELECT output.candidate_index,output.deliverable_id,
+                   output.revision_id,revision.revision_no,
+                   revision.title,revision.status
+            FROM agent_candidate_review_outputs AS output
+            JOIN deliverable_revisions AS revision ON revision.id=output.revision_id
+            WHERE output.review_id=? ORDER BY output.candidate_index
+            """,
+            (review_id,),
+        )
+    ]
+    return {
+        "candidate_result_id": row["candidate_result_id"],
+        "candidate_created_at": row["candidate_created_at"],
+        "project": {
+            "id": row["project_id"],
+            "status": row["project_status"],
+            "cycle_id": row["cycle_id"],
+            "cycle_no": row["cycle_no"],
+            "name": row["project_name"],
+            "owner": row["project_owner"],
+        },
+        "agent_job": {
+            "id": row["agent_job_id"],
+            "action": row["action"],
+            "status": row["agent_job_status"],
+            "request_contract": json.loads(row["request_json"]),
+        },
+        "allowed_sources": allowed_sources,
+        "original_result": json.loads(row["result_json"]),
+        "review": {
+            "id": row["review_id"],
+            "decision": row["decision"],
+            "actor": row["actor"],
+            "actor_role": row["actor_role"],
+            "reason": row["reason"],
+            "reviewed_result": json.loads(row["reviewed_result_json"]),
+            "created_at": row["reviewed_at"],
+        },
+        "outputs": outputs,
+    }
 
 
 def markdown_file_path(value: str) -> Path:
@@ -289,7 +532,13 @@ def markdown_file_path(value: str) -> Path:
 
 
 def markdown_db_path(path: Path) -> str:
-    relative = path.resolve().relative_to(CONTENT_ROOT.resolve())
+    # Keep this comparison lexical.  Packaged Windows apps can redirect a file
+    # into LocalCache when it is opened, so resolve() may return a physical path
+    # that is no longer beneath the logical CONTENT_ROOT even though it is the
+    # same application storage location.
+    relative = Path(os.path.abspath(path)).relative_to(
+        Path(os.path.abspath(CONTENT_ROOT))
+    )
     return str(Path("content") / relative).replace("\\", "/")
 
 
@@ -559,9 +808,145 @@ def ensure_deliverable_revision_history() -> None:
         connection.close()
 
 
+def ensure_deliverable_change_control() -> None:
+    connection = sqlite3.connect(DB_PATH)
+    connection.row_factory = sqlite3.Row
+    try:
+        connection.executescript(
+            """
+            CREATE TABLE IF NOT EXISTS deliverable_change_requests (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                deliverable_id INTEGER NOT NULL,
+                base_revision_id INTEGER NOT NULL,
+                status TEXT NOT NULL DEFAULT 'proposed'
+                    CHECK(status IN ('proposed', 'accepted', 'rejected')),
+                reason TEXT NOT NULL,
+                base_fields_json TEXT NOT NULL,
+                proposed_fields_json TEXT NOT NULL,
+                changed_fields_json TEXT NOT NULL,
+                impact_analysis_json TEXT NOT NULL,
+                acceptance_items_json TEXT NOT NULL,
+                evidence_source_ids_json TEXT NOT NULL DEFAULT '[]',
+                source_candidate_result_id INTEGER,
+                created_by TEXT NOT NULL,
+                decision_reason TEXT NOT NULL DEFAULT '',
+                decided_by TEXT NOT NULL DEFAULT '',
+                decided_at TEXT NOT NULL DEFAULT '',
+                created_revision_id INTEGER,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                FOREIGN KEY(deliverable_id)
+                    REFERENCES deliverables(id) ON DELETE CASCADE,
+                FOREIGN KEY(base_revision_id)
+                    REFERENCES deliverable_revisions(id) ON DELETE RESTRICT,
+                FOREIGN KEY(source_candidate_result_id)
+                    REFERENCES agent_candidate_results(id) ON DELETE SET NULL,
+                FOREIGN KEY(created_revision_id)
+                    REFERENCES deliverable_revisions(id) ON DELETE RESTRICT
+            );
+            CREATE TABLE IF NOT EXISTS deliverable_change_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                change_request_id INTEGER NOT NULL,
+                event_type TEXT NOT NULL
+                    CHECK(event_type IN ('proposed', 'accepted', 'rejected')),
+                actor TEXT NOT NULL,
+                reason TEXT NOT NULL DEFAULT '',
+                snapshot_json TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                FOREIGN KEY(change_request_id)
+                    REFERENCES deliverable_change_requests(id) ON DELETE CASCADE
+            );
+            CREATE INDEX IF NOT EXISTS idx_change_requests_deliverable
+                ON deliverable_change_requests(deliverable_id, status, created_at);
+            CREATE INDEX IF NOT EXISTS idx_change_events_request
+                ON deliverable_change_events(change_request_id, created_at);
+            """
+        )
+        connection.execute(
+            "INSERT OR IGNORE INTO schema_migrations(version,applied_at) VALUES (11,?)",
+            (now_iso(),),
+        )
+        connection.commit()
+        connection.execute("PRAGMA foreign_keys = ON")
+        violations = connection.execute("PRAGMA foreign_key_check").fetchall()
+        if violations:
+            raise sqlite3.IntegrityError(
+                "Deliverable change control migration 11 foreign key check failed"
+            )
+    except Exception:
+        connection.rollback()
+        raise
+    finally:
+        connection.close()
+
+
+def ensure_revision_acceptance_references() -> None:
+    connection = sqlite3.connect(DB_PATH)
+    connection.row_factory = sqlite3.Row
+    try:
+        connection.execute("PRAGMA foreign_keys = ON")
+        connection.executescript(
+            """
+            CREATE TABLE IF NOT EXISTS revision_acceptance_references (
+                revision_id INTEGER NOT NULL,
+                content_id INTEGER NOT NULL,
+                linked_by TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                PRIMARY KEY(revision_id, content_id),
+                FOREIGN KEY(revision_id)
+                    REFERENCES deliverable_revisions(id) ON DELETE CASCADE,
+                FOREIGN KEY(content_id)
+                    REFERENCES contents(id) ON DELETE RESTRICT
+            );
+            CREATE INDEX IF NOT EXISTS idx_revision_acceptance_reference_content
+                ON revision_acceptance_references(content_id, revision_id);
+            """
+        )
+        connection.execute(
+            "INSERT OR IGNORE INTO schema_migrations(version,applied_at) VALUES (12,?)",
+            (now_iso(),),
+        )
+        connection.commit()
+        violations = connection.execute("PRAGMA foreign_key_check").fetchall()
+        if violations:
+            raise sqlite3.IntegrityError(
+                "Revision acceptance reference migration 12 foreign key check failed"
+            )
+    except Exception:
+        connection.rollback()
+        raise
+    finally:
+        connection.close()
+
+
+def ensure_content_files() -> None:
+    with db() as connection:
+        connection.executescript(
+            """
+            CREATE TABLE IF NOT EXISTS content_files (
+                content_id INTEGER PRIMARY KEY,
+                original_name TEXT NOT NULL,
+                stored_path TEXT NOT NULL UNIQUE,
+                media_type TEXT NOT NULL DEFAULT 'application/octet-stream',
+                size_bytes INTEGER NOT NULL,
+                sha256 TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                FOREIGN KEY(content_id) REFERENCES contents(id) ON DELETE CASCADE
+            );
+            CREATE INDEX IF NOT EXISTS idx_content_files_sha256
+                ON content_files(sha256);
+            """
+        )
+        connection.execute(
+            "INSERT OR IGNORE INTO schema_migrations(version,applied_at) VALUES (13,?)",
+            (now_iso(),),
+        )
+
+
 def init_storage() -> None:
     DATA_ROOT.mkdir(parents=True, exist_ok=True)
     CONTENT_ROOT.mkdir(parents=True, exist_ok=True)
+    UPLOAD_ROOT.mkdir(parents=True, exist_ok=True)
     BACKUP_ROOT.mkdir(parents=True, exist_ok=True)
     LOG_ROOT.mkdir(parents=True, exist_ok=True)
     for folder in TYPE_FOLDERS.values():
@@ -811,6 +1196,48 @@ CREATE TABLE IF NOT EXISTS deliverable_status_transitions (
                 FOREIGN KEY(revision_id)
                     REFERENCES deliverable_revisions(id) ON DELETE RESTRICT
             );
+            CREATE TABLE IF NOT EXISTS deliverable_change_requests (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                deliverable_id INTEGER NOT NULL,
+                base_revision_id INTEGER NOT NULL,
+                status TEXT NOT NULL DEFAULT 'proposed'
+                    CHECK(status IN ('proposed', 'accepted', 'rejected')),
+                reason TEXT NOT NULL,
+                base_fields_json TEXT NOT NULL,
+                proposed_fields_json TEXT NOT NULL,
+                changed_fields_json TEXT NOT NULL,
+                impact_analysis_json TEXT NOT NULL,
+                acceptance_items_json TEXT NOT NULL,
+                evidence_source_ids_json TEXT NOT NULL DEFAULT '[]',
+                source_candidate_result_id INTEGER,
+                created_by TEXT NOT NULL,
+                decision_reason TEXT NOT NULL DEFAULT '',
+                decided_by TEXT NOT NULL DEFAULT '',
+                decided_at TEXT NOT NULL DEFAULT '',
+                created_revision_id INTEGER,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                FOREIGN KEY(deliverable_id)
+                    REFERENCES deliverables(id) ON DELETE CASCADE,
+                FOREIGN KEY(base_revision_id)
+                    REFERENCES deliverable_revisions(id) ON DELETE RESTRICT,
+                FOREIGN KEY(source_candidate_result_id)
+                    REFERENCES agent_candidate_results(id) ON DELETE SET NULL,
+                FOREIGN KEY(created_revision_id)
+                    REFERENCES deliverable_revisions(id) ON DELETE RESTRICT
+            );
+            CREATE TABLE IF NOT EXISTS deliverable_change_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                change_request_id INTEGER NOT NULL,
+                event_type TEXT NOT NULL
+                    CHECK(event_type IN ('proposed', 'accepted', 'rejected')),
+                actor TEXT NOT NULL,
+                reason TEXT NOT NULL DEFAULT '',
+                snapshot_json TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                FOREIGN KEY(change_request_id)
+                    REFERENCES deliverable_change_requests(id) ON DELETE CASCADE
+            );
             INSERT OR IGNORE INTO settings(id) VALUES (1);
                        """
         )
@@ -861,6 +1288,9 @@ CREATE TABLE IF NOT EXISTS deliverable_status_transitions (
     ensure_agent_jobs_running_status()
     ensure_agent_job_review_status()
     ensure_deliverable_revision_history()
+    ensure_deliverable_change_control()
+    ensure_revision_acceptance_references()
+    ensure_content_files()
 
 
 def migrate_legacy_storage(target_root: Path) -> bool:
@@ -923,6 +1353,9 @@ def create_backup(reason: str = "manual") -> dict[str, Any]:
             for path in CONTENT_ROOT.rglob("*"):
                 if path.is_file():
                     archive.write(path, str(Path("content") / path.relative_to(CONTENT_ROOT)).replace("\\", "/"))
+            for path in UPLOAD_ROOT.rglob("*"):
+                if path.is_file():
+                    archive.write(path, str(Path("uploads") / path.relative_to(UPLOAD_ROOT)).replace("\\", "/"))
     return list_backups()[0]
 
 
@@ -950,12 +1383,19 @@ def restore_backup(name: str) -> dict[str, Any]:
             check.close()
         restored_content = staging / "content"
         restored_content.mkdir(exist_ok=True)
+        restored_uploads = staging / "uploads"
+        restored_uploads.mkdir(exist_ok=True)
         previous_content = APP_DATA_ROOT / ".restore-previous-content"
+        previous_uploads = APP_DATA_ROOT / ".restore-previous-uploads"
         if previous_content.exists():
             shutil.rmtree(previous_content)
+        if previous_uploads.exists():
+            shutil.rmtree(previous_uploads)
         CONTENT_ROOT.replace(previous_content)
+        UPLOAD_ROOT.replace(previous_uploads)
         try:
             shutil.copytree(restored_content, CONTENT_ROOT)
+            shutil.copytree(restored_uploads, UPLOAD_ROOT)
             source = sqlite3.connect(restored_database)
             destination = sqlite3.connect(DB_PATH)
             try:
@@ -966,9 +1406,13 @@ def restore_backup(name: str) -> dict[str, Any]:
         except Exception:
             if CONTENT_ROOT.exists():
                 shutil.rmtree(CONTENT_ROOT)
+            if UPLOAD_ROOT.exists():
+                shutil.rmtree(UPLOAD_ROOT)
             previous_content.replace(CONTENT_ROOT)
+            previous_uploads.replace(UPLOAD_ROOT)
             raise
         shutil.rmtree(previous_content)
+        shutil.rmtree(previous_uploads)
     init_storage()
     return {"ok": True, "restored": backup_name, "safety_backup": safety_backup["name"]}
 
@@ -1076,6 +1520,270 @@ def flatten_json_messages(value: Any) -> str:
     return "\n\n".join(dict.fromkeys(lines))
 
 
+REVISION_CHANGE_FIELDS = (
+    "title",
+    "scope",
+    "acceptance_criteria",
+    "owner",
+    "approver",
+    "due_date",
+    "due_date_status",
+)
+
+REVISION_CHANGE_LABELS = {
+    "title": "成果名称",
+    "scope": "交付范围",
+    "acceptance_criteria": "验收标准",
+    "owner": "执行负责人",
+    "approver": "验收负责人",
+    "due_date": "截止日期",
+    "due_date_status": "日期状态",
+}
+
+REVISION_IMPACT_TYPES = {
+    "title": "scope",
+    "scope": "scope",
+    "acceptance_criteria": "acceptance",
+    "owner": "responsibility",
+    "approver": "responsibility",
+    "due_date": "schedule",
+    "due_date_status": "schedule",
+}
+
+
+def revision_business_fields(row: sqlite3.Row | dict[str, Any]) -> dict[str, str]:
+    return {field: str(row[field] or "") for field in REVISION_CHANGE_FIELDS}
+
+
+def normalize_revision_change_fields(
+    base_fields: dict[str, str],
+    raw_fields: Any,
+) -> tuple[dict[str, str], list[dict[str, str]]]:
+    if not isinstance(raw_fields, dict):
+        raise ValueError("变更字段格式无效")
+    if set(raw_fields) - set(REVISION_CHANGE_FIELDS):
+        raise ValueError("变更包含不支持的字段")
+    proposed = dict(base_fields)
+    for field, value in raw_fields.items():
+        proposed[field] = str(value or "").strip()
+    if not proposed["title"]:
+        raise ValueError("请填写交付成果名称")
+    if not proposed["owner"]:
+        raise ValueError("请填写执行负责人")
+    if not proposed["approver"]:
+        raise ValueError("请填写验收负责人")
+    if proposed["due_date_status"] not in {"confirmed", "pending"}:
+        raise ValueError("截止日期状态无效")
+    if proposed["due_date_status"] == "confirmed" and not proposed["due_date"]:
+        raise ValueError("确认截止日期时必须提供日期")
+    changed = [
+        {
+            "field": field,
+            "label": REVISION_CHANGE_LABELS[field],
+            "before": base_fields[field],
+            "after": proposed[field],
+        }
+        for field in REVISION_CHANGE_FIELDS
+        if base_fields[field] != proposed[field]
+    ]
+    if not changed:
+        raise ValueError("变更内容与当前版本相同")
+    return proposed, changed
+
+
+def normalize_acceptance_items(raw_items: Any) -> list[dict[str, str]]:
+    if not isinstance(raw_items, list) or not raw_items:
+        raise ValueError("请至少填写一项新版本验收清单")
+    normalized = []
+    for item in raw_items:
+        if not isinstance(item, dict):
+            raise ValueError("验收项格式无效")
+        text = str(item.get("text", "")).strip()
+        status = str(item.get("status", "pending")).strip()
+        evidence = str(item.get("evidence", "")).strip()
+        if not text:
+            raise ValueError("验收项内容不能为空")
+        if status not in {"pending", "satisfied", "not_applicable"}:
+            raise ValueError("验收项状态无效")
+        normalized.append({"text": text, "status": status, "evidence": evidence})
+    return normalized
+
+
+def normalize_change_impacts(
+    connection: sqlite3.Connection,
+    project_id: int,
+    deliverable_id: int,
+    changed_fields: list[dict[str, str]],
+    raw_impacts: Any,
+) -> list[dict[str, Any]]:
+    allowed_types = {"scope", "schedule", "responsibility", "acceptance"}
+    if raw_impacts in (None, []):
+        impact_types = sorted(
+            {
+                REVISION_IMPACT_TYPES[item["field"]]
+                for item in changed_fields
+            }
+        )
+        return [
+            {
+                "deliverable_id": deliverable_id,
+                "impact_types": impact_types,
+                "description": "根据字段变化自动生成，请负责人确认。",
+                "origin": "rule",
+            }
+        ]
+    if not isinstance(raw_impacts, list):
+        raise ValueError("影响分析格式无效")
+    normalized = []
+    seen: set[int] = set()
+    for impact in raw_impacts:
+        if not isinstance(impact, dict):
+            raise ValueError("影响项格式无效")
+        affected_id = impact.get("deliverable_id")
+        if (
+            isinstance(affected_id, bool)
+            or not isinstance(affected_id, int)
+            or affected_id < 1
+        ):
+            raise ValueError("受影响交付成果编号无效")
+        if affected_id in seen:
+            raise ValueError("同一交付成果不能重复添加影响项")
+        affected = connection.execute(
+            "SELECT project_id FROM deliverables WHERE id=?",
+            (affected_id,),
+        ).fetchone()
+        if not affected:
+            raise ValueError("受影响交付成果不存在")
+        if affected["project_id"] != project_id:
+            raise ValueError("受影响交付成果不属于当前项目")
+        impact_types = impact.get("impact_types")
+        if (
+            not isinstance(impact_types, list)
+            or not impact_types
+            or any(str(value) not in allowed_types for value in impact_types)
+        ):
+            raise ValueError("影响类型无效")
+        normalized.append(
+            {
+                "deliverable_id": affected_id,
+                "impact_types": sorted(set(str(value) for value in impact_types)),
+                "description": str(impact.get("description", "")).strip(),
+                "origin": str(impact.get("origin", "manual")).strip() or "manual",
+            }
+        )
+        seen.add(affected_id)
+    return normalized
+
+
+def json_compact(value: Any) -> str:
+    return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+
+
+def change_request_record(row: sqlite3.Row | dict[str, Any]) -> dict[str, Any]:
+    result = dict(row)
+    for column in (
+        "base_fields_json",
+        "proposed_fields_json",
+        "changed_fields_json",
+        "impact_analysis_json",
+        "acceptance_items_json",
+        "evidence_source_ids_json",
+    ):
+        result[column.removesuffix("_json")] = json.loads(result.pop(column))
+    return result
+
+
+def change_request_report(
+    connection: sqlite3.Connection,
+    change_request_id: int,
+) -> dict[str, Any] | None:
+    row = connection.execute(
+        """
+        SELECT
+            change_request.*,
+            deliverable.project_id,
+            project.status AS project_status,
+            cycle.id AS cycle_id,
+            cycle.cycle_no,
+            cycle.name AS project_name,
+            cycle.owner AS project_owner
+        FROM deliverable_change_requests AS change_request
+        JOIN deliverables AS deliverable
+          ON deliverable.id=change_request.deliverable_id
+        JOIN projects AS project ON project.id=deliverable.project_id
+        LEFT JOIN project_cycles AS cycle ON cycle.id=project.current_cycle_id
+        WHERE change_request.id=?
+        """,
+        (change_request_id,),
+    ).fetchone()
+    if not row:
+        return None
+    report = change_request_record(row)
+    base_revision = connection.execute(
+        "SELECT * FROM deliverable_revisions WHERE id=?",
+        (report["base_revision_id"],),
+    ).fetchone()
+    created_revision = None
+    if report["created_revision_id"]:
+        created_revision = connection.execute(
+            "SELECT * FROM deliverable_revisions WHERE id=?",
+            (report["created_revision_id"],),
+        ).fetchone()
+    source_ids = report["evidence_source_ids"]
+    sources = []
+    if source_ids:
+        placeholders = ",".join("?" for _ in source_ids)
+        sources = [
+            dict(source)
+            for source in connection.execute(
+                f"SELECT id,title,source FROM contents WHERE id IN ({placeholders}) ORDER BY id",
+                tuple(source_ids),
+            )
+        ]
+    impacted_ids = [
+        impact["deliverable_id"]
+        for impact in report["impact_analysis"]
+        if isinstance(impact, dict) and isinstance(impact.get("deliverable_id"), int)
+    ]
+    impacted_deliverables: dict[int, str] = {}
+    if impacted_ids:
+        placeholders = ",".join("?" for _ in impacted_ids)
+        impacted_deliverables = {
+            item["id"]: item["title"]
+            for item in connection.execute(
+                "SELECT d.id,r.title FROM deliverables d "
+                "JOIN deliverable_revisions r ON r.id=d.current_revision_id "
+                f"WHERE d.id IN ({placeholders})",
+                tuple(impacted_ids),
+            )
+        }
+    for impact in report["impact_analysis"]:
+        if isinstance(impact, dict):
+            impact["deliverable_title"] = impacted_deliverables.get(
+                impact.get("deliverable_id"),
+                "未知交付成果",
+            )
+    report["base_revision"] = dict(base_revision) if base_revision else None
+    report["created_revision"] = (
+        dict(created_revision) if created_revision else None
+    )
+    report["evidence_sources"] = sources
+    report["events"] = [
+        {
+            **dict(event),
+            "snapshot": json.loads(event["snapshot_json"]),
+        }
+        for event in connection.execute(
+            "SELECT * FROM deliverable_change_events "
+            "WHERE change_request_id=? ORDER BY id",
+            (change_request_id,),
+        )
+    ]
+    for event in report["events"]:
+        event.pop("snapshot_json", None)
+    return report
+
+
 def openai_request(messages: list[dict[str, str]], settings: sqlite3.Row) -> str:
     request = urllib.request.Request(
         f"{settings['base_url'].rstrip('/')}/chat/completions",
@@ -1179,6 +1887,17 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def file_response(self, path: Path, download_name: str, media_type: str) -> None:
+        body = path.read_bytes()
+        safe_download = Path(download_name).name.replace('"', "")
+        encoded_name = quote(safe_download)
+        self.send_response(HTTPStatus.OK)
+        self.send_header("Content-Type", media_type or "application/octet-stream")
+        self.send_header("Content-Disposition", f"attachment; filename*=UTF-8''{encoded_name}")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
     def read_json(self) -> dict[str, Any]:
         length = int(self.headers.get("Content-Length", "0"))
         return json.loads(self.rfile.read(length).decode("utf-8")) if length else {}
@@ -1254,6 +1973,21 @@ class Handler(BaseHTTPRequestHandler):
             self.json_response(check_for_updates())
             return
         with db() as connection:
+            content_file_match = re.fullmatch(r"/api/contents/(\d+)/file", path)
+            if content_file_match:
+                row = connection.execute(
+                    "SELECT original_name,stored_path,media_type FROM content_files WHERE content_id=?",
+                    (int(content_file_match.group(1)),),
+                ).fetchone()
+                if not row:
+                    self.json_response({"error": "该资料没有保留原始文件"}, HTTPStatus.NOT_FOUND)
+                    return
+                target = (UPLOAD_ROOT / row["stored_path"]).resolve()
+                if target.parent != UPLOAD_ROOT.resolve() or not target.is_file():
+                    self.json_response({"error": "原始文件不存在"}, HTTPStatus.NOT_FOUND)
+                    return
+                self.file_response(target, row["original_name"], row["media_type"])
+                return
             if path == "/api/project-overview":
                 projects = []
                 for row in connection.execute(
@@ -1265,32 +1999,247 @@ class Handler(BaseHTTPRequestHandler):
                     project["deliverables"] = [dict(item) for item in connection.execute(
                         "SELECT d.id,d.current_revision_id,r.revision_no,r.title,r.scope,"
                         "r.acceptance_criteria,r.owner,r.approver,r.due_date,"
-                        "r.due_date_status,r.status "
+                        "r.due_date_status,r.status,"
+                        "(SELECT COUNT(*) FROM deliverable_revisions history "
+                        " WHERE history.deliverable_id=d.id) AS revision_count "
                         "FROM deliverables d LEFT JOIN deliverable_revisions r "
                         "ON r.id=d.current_revision_id WHERE d.project_id=? ORDER BY d.id",
                         (row["id"],),
                     )]
-                    for deliverable in project["deliverables"]:
-                        deliverable["revisions"] = [
-                            dict(revision)
-                            for revision in connection.execute(
-                                "SELECT id,revision_no,title,scope,acceptance_criteria,"
-                                "owner,approver,due_date,due_date_status,status,created_at "
-                                "FROM deliverable_revisions WHERE deliverable_id=? "
-                                "ORDER BY revision_no DESC",
-                                (deliverable["id"],),
-                            )
-                        ]
+                    project["change_requests"] = [
+                        change_request_record(change_request)
+                        for change_request in connection.execute(
+                            """
+                            SELECT change_request.*,
+                                   base_revision.revision_no AS base_revision_no
+                            FROM deliverable_change_requests change_request
+                            JOIN deliverables deliverable
+                              ON deliverable.id=change_request.deliverable_id
+                            JOIN deliverable_revisions base_revision
+                              ON base_revision.id=change_request.base_revision_id
+                            WHERE deliverable.project_id=?
+                            ORDER BY change_request.created_at DESC,change_request.id DESC
+                            """,
+                            (row["id"],),
+                        )
+                    ]
                     projects.append(project)
                 self.json_response(projects)
+                return
+            revision_list_match = re.fullmatch(
+                r"/api/deliverables/(\d+)/revisions",
+                path,
+            )
+            if revision_list_match:
+                deliverable_id = int(revision_list_match.group(1))
+                deliverable = connection.execute(
+                    "SELECT id,current_revision_id FROM deliverables WHERE id=?",
+                    (deliverable_id,),
+                ).fetchone()
+                if not deliverable:
+                    self.json_response(
+                        {"error": "交付成果不存在"},
+                        HTTPStatus.NOT_FOUND,
+                    )
+                    return
+                try:
+                    limit = min(max(int(query.get("limit", ["10"])[0]), 1), 50)
+                    offset = max(int(query.get("offset", ["0"])[0]), 0)
+                except ValueError:
+                    self.json_response(
+                        {"error": "分页参数必须是整数"},
+                        HTTPStatus.BAD_REQUEST,
+                    )
+                    return
+                requested_status = query.get("status", [""])[0].strip()
+                valid_statuses = {
+                    "draft",
+                    "confirmed",
+                    "doing",
+                    "submitted",
+                    "accepted",
+                }
+                if requested_status and requested_status not in valid_statuses:
+                    self.json_response(
+                        {"error": "版本状态筛选值无效"},
+                        HTTPStatus.BAD_REQUEST,
+                    )
+                    return
+                search = query.get("q", [""])[0].strip()
+                clauses = ["deliverable_id=?"]
+                parameters: list[Any] = [deliverable_id]
+                if requested_status:
+                    clauses.append("status=?")
+                    parameters.append(requested_status)
+                if search:
+                    clauses.append(
+                        "(CAST(revision_no AS TEXT) LIKE ? OR title LIKE ? "
+                        "OR acceptance_criteria LIKE ? OR owner LIKE ? OR approver LIKE ?)"
+                    )
+                    pattern = f"%{search}%"
+                    parameters.extend([pattern] * 5)
+                where_clause = " AND ".join(clauses)
+                total = connection.execute(
+                    f"SELECT COUNT(*) AS total FROM deliverable_revisions WHERE {where_clause}",
+                    tuple(parameters),
+                ).fetchone()["total"]
+                items = [
+                    {
+                        **dict(revision),
+                        "is_current": revision["id"]
+                        == deliverable["current_revision_id"],
+                    }
+                    for revision in connection.execute(
+                        "SELECT id,revision_no,title,scope,acceptance_criteria,"
+                        "owner,approver,due_date,due_date_status,status,created_at "
+                        f"FROM deliverable_revisions WHERE {where_clause} "
+                        "ORDER BY revision_no DESC,id DESC LIMIT ? OFFSET ?",
+                        (*parameters, limit, offset),
+                    )
+                ]
+                self.json_response(
+                    {
+                        "items": items,
+                        "total": total,
+                        "limit": limit,
+                        "offset": offset,
+                        "has_more": offset + len(items) < total,
+                    }
+                )
+                return
+            revision_detail_match = re.fullmatch(
+                r"/api/deliverable-revisions/(\d+)",
+                path,
+            )
+            if revision_detail_match:
+                revision_id = int(revision_detail_match.group(1))
+                revision = connection.execute(
+                    """
+                    SELECT revision.*,deliverable.project_id,
+                           deliverable.current_revision_id,
+                           project.status AS project_status,
+                           cycle.id AS cycle_id,cycle.cycle_no,
+                           cycle.name AS project_name
+                    FROM deliverable_revisions AS revision
+                    JOIN deliverables AS deliverable
+                      ON deliverable.id=revision.deliverable_id
+                    JOIN projects AS project ON project.id=deliverable.project_id
+                    LEFT JOIN project_cycles AS cycle
+                      ON cycle.id=project.current_cycle_id
+                    WHERE revision.id=?
+                    """,
+                    (revision_id,),
+                ).fetchone()
+                if not revision:
+                    self.json_response(
+                        {"error": "版本不存在"},
+                        HTTPStatus.NOT_FOUND,
+                    )
+                    return
+                previous = connection.execute(
+                    "SELECT * FROM deliverable_revisions "
+                    "WHERE deliverable_id=? AND revision_no<? "
+                    "ORDER BY revision_no DESC,id DESC LIMIT 1",
+                    (revision["deliverable_id"], revision["revision_no"]),
+                ).fetchone()
+                compared_fields = (
+                    "title",
+                    "scope",
+                    "acceptance_criteria",
+                    "owner",
+                    "approver",
+                    "due_date",
+                    "due_date_status",
+                    "status",
+                )
+                field_labels = {
+                    "title": "成果名称",
+                    "scope": "交付范围",
+                    "acceptance_criteria": "验收标准",
+                    "owner": "执行负责人",
+                    "approver": "验收负责人",
+                    "due_date": "截止日期",
+                    "due_date_status": "日期状态",
+                    "status": "版本状态",
+                }
+                changed_fields = []
+                if previous:
+                    for field in compared_fields:
+                        if (previous[field] or "") != (revision[field] or ""):
+                            changed_fields.append(
+                                {
+                                    "field": field,
+                                    "label": field_labels[field],
+                                    "before": previous[field],
+                                    "after": revision[field],
+                                }
+                            )
+                origin = connection.execute(
+                    """
+                    SELECT review.id AS review_id,review.decision,review.actor,
+                           review.reason,review.created_at,candidate.id AS candidate_result_id,
+                           job.id AS agent_job_id
+                    FROM agent_candidate_review_outputs AS output
+                    JOIN agent_candidate_reviews AS review ON review.id=output.review_id
+                    JOIN agent_candidate_results AS candidate
+                      ON candidate.id=review.candidate_result_id
+                    JOIN agent_jobs AS job ON job.id=candidate.agent_job_id
+                    WHERE output.revision_id=?
+                    """,
+                    (revision_id,),
+                ).fetchone()
+                change_request = connection.execute(
+                    "SELECT id FROM deliverable_change_requests "
+                    "WHERE created_revision_id=?",
+                    (revision_id,),
+                ).fetchone()
+                self.json_response(
+                    {
+                        "revision": {
+                            **dict(revision),
+                            "is_current": revision_id
+                            == revision["current_revision_id"],
+                        },
+                        "previous_revision": dict(previous) if previous else None,
+                        "changed_fields": changed_fields,
+                        "status_transitions": [
+                            dict(item)
+                            for item in connection.execute(
+                                "SELECT * FROM deliverable_status_transitions "
+                                "WHERE revision_id=? ORDER BY created_at,id",
+                                (revision_id,),
+                            )
+                        ],
+                        "candidate_review": dict(origin) if origin else None,
+                        "acceptance_references": [
+                            dict(item)
+                            for item in connection.execute(
+                                """
+                                SELECT content.id,content.title,content.body,
+                                       content.category_id,link.linked_by,link.created_at
+                                FROM revision_acceptance_references AS link
+                                JOIN contents AS content ON content.id=link.content_id
+                                WHERE link.revision_id=?
+                                ORDER BY content.title,content.id
+                                """,
+                                (revision_id,),
+                            )
+                        ],
+                        "change_request": (
+                            change_request_report(connection, change_request["id"])
+                            if change_request
+                            else None
+                        ),
+                    }
+                )
                 return
             if path == "/api/health":
                 version = connection.execute("SELECT MAX(version) AS version FROM schema_migrations").fetchone()["version"] or 0
                 self.json_response({"ok": True, "product": "Finto", "version": APP_VERSION, "schema_version": version})
                 return
             if path == "/api/bootstrap":
-                contents = [dict(row) for row in connection.execute("SELECT * FROM contents WHERE deleted_at='' ORDER BY updated_at DESC")]
-                trash = [dict(row) for row in connection.execute("SELECT * FROM contents WHERE deleted_at<>'' ORDER BY deleted_at DESC")]
+                contents = [content_record(connection, row) for row in connection.execute("SELECT * FROM contents WHERE deleted_at='' ORDER BY updated_at DESC")]
+                trash = [content_record(connection, row) for row in connection.execute("SELECT * FROM contents WHERE deleted_at<>'' ORDER BY deleted_at DESC")]
                 tasks = [dict(row) for row in connection.execute(
                     "SELECT tasks.*, contents.title AS source_title FROM tasks LEFT JOIN contents ON contents.id=tasks.source_content_id ORDER BY tasks.status='done', tasks.due_date, tasks.id DESC"
                 )]
@@ -1304,109 +2253,120 @@ class Handler(BaseHTTPRequestHandler):
                 onboarding = connection.execute("SELECT value FROM app_state WHERE key='onboarding_completed'").fetchone()
                 self.json_response({"contents": contents, "trash": trash, "backups": list_backups(), "tasks": tasks, "chatSources": sources, "chatRegistrations": registrations, "categories": categories, "weeklyPlans": weekly_plans, "settings": settings, "system": {"data_root": str(APP_DATA_ROOT), "schema_version": version, "version": APP_VERSION, "onboarding_completed": bool(onboarding and onboarding["value"] == "1")}})
                 return
+            review_detail_match = re.fullmatch(r"/api/agent-candidate-reviews/(\d+)", path)
+            if review_detail_match:
+                detail = agent_review_detail(connection, int(review_detail_match.group(1)))
+                if not detail:
+                    self.json_response({"error": "处理记录不存在"}, HTTPStatus.NOT_FOUND)
+                    return
+                self.json_response(detail)
+                return
             if path == "/api/agent-candidate-results/history":
+                try:
+                    limit = min(max(int(query.get("limit", ["20"])[0]), 1), 100)
+                    offset = max(int(query.get("offset", ["0"])[0]), 0)
+                except ValueError:
+                    self.json_response({"error": "分页参数无效"}, HTTPStatus.BAD_REQUEST)
+                    return
+                decision = query.get("decision", [""])[0].strip()
+                project_value = query.get("project_id", [""])[0].strip()
+                search = query.get("q", [""])[0].strip()
+                date_from = query.get("date_from", [""])[0].strip()
+                date_to = query.get("date_to", [""])[0].strip()
+                if decision and decision not in {"accepted", "modified", "rejected"}:
+                    self.json_response({"error": "处理结果筛选值无效"}, HTTPStatus.BAD_REQUEST)
+                    return
+                if project_value and not project_value.isdigit():
+                    self.json_response({"error": "项目筛选值无效"}, HTTPStatus.BAD_REQUEST)
+                    return
+                for date_value in (date_from, date_to):
+                    if date_value and not re.fullmatch(r"\d{4}-\d{2}-\d{2}", date_value):
+                        self.json_response({"error": "日期筛选值无效"}, HTTPStatus.BAD_REQUEST)
+                        return
+                joins = (
+                    " FROM agent_candidate_reviews review "
+                    "JOIN agent_candidate_results cr ON cr.id=review.candidate_result_id "
+                    "JOIN agent_jobs aj ON aj.id=cr.agent_job_id "
+                    "JOIN projects p ON p.id=aj.project_id "
+                    "LEFT JOIN project_cycles pc ON pc.id=p.current_cycle_id "
+                )
+                where = ["1=1"]
+                parameters: list[Any] = []
+                if project_value:
+                    where.append("p.id=?")
+                    parameters.append(int(project_value))
+                if decision:
+                    where.append("review.decision=?")
+                    parameters.append(decision)
+                if date_from:
+                    where.append("substr(review.created_at,1,10)>=?")
+                    parameters.append(date_from)
+                if date_to:
+                    where.append("substr(review.created_at,1,10)<=?")
+                    parameters.append(date_to)
+                if search:
+                    pattern = f"%{search}%"
+                    where.append(
+                        "(pc.name LIKE ? OR EXISTS ("
+                        "SELECT 1 FROM agent_candidate_review_outputs output "
+                        "JOIN deliverable_revisions revision ON revision.id=output.revision_id "
+                        "WHERE output.review_id=review.id AND revision.title LIKE ?))"
+                    )
+                    parameters.extend((pattern, pattern))
+                where_sql = " WHERE " + " AND ".join(where)
+                total = connection.execute(
+                    "SELECT COUNT(*)" + joins + where_sql,
+                    tuple(parameters),
+                ).fetchone()[0]
                 rows = connection.execute(
                     """
-                    SELECT
-                        review.id AS review_id,
-                        review.decision,
-                        review.actor,
-                        review.actor_role,
-                        review.reason,
-                        review.reviewed_result_json,
-                        review.created_at AS reviewed_at,
-                        cr.id AS candidate_result_id,
-                        cr.result_json,
-                        cr.created_at AS candidate_created_at,
-                        aj.id AS agent_job_id,
-                        aj.action,
-                        aj.status AS agent_job_status,
-                        aj.request_json,
-                        p.id AS project_id,
-                        p.status AS project_status,
-                        pc.id AS cycle_id,
-                        pc.cycle_no,
-                        pc.name AS project_name,
-                        pc.owner AS project_owner
-                    FROM agent_candidate_reviews AS review
-                    JOIN agent_candidate_results AS cr
-                      ON cr.id=review.candidate_result_id
-                    JOIN agent_jobs AS aj ON aj.id=cr.agent_job_id
-                    JOIN projects AS p ON p.id=aj.project_id
-                    LEFT JOIN project_cycles AS pc ON pc.id=p.current_cycle_id
-                    ORDER BY review.created_at DESC,review.id DESC
+                    SELECT review.id AS review_id,review.decision,review.actor,
+                           review.created_at AS reviewed_at,aj.id AS agent_job_id,
+                           p.id AS project_id,pc.cycle_no,pc.name AS project_name,
+                           GROUP_CONCAT(revision.title, '、') AS output_titles
                     """
+                    + joins
+                    + " LEFT JOIN agent_candidate_review_outputs output ON output.review_id=review.id "
+                    + " LEFT JOIN deliverable_revisions revision ON revision.id=output.revision_id "
+                    + where_sql
+                    + " GROUP BY review.id ORDER BY review.created_at DESC,review.id DESC LIMIT ? OFFSET ?",
+                    tuple(parameters + [limit, offset]),
                 ).fetchall()
-                history = []
-                for row in rows:
-                    allowed_sources = [
-                        dict(source)
-                        for source in connection.execute(
-                            """
-                            SELECT c.id,c.title,c.ai_access
-                            FROM agent_job_allowed_sources AS allowed
-                            JOIN contents AS c ON c.id=allowed.source_id
-                            WHERE allowed.agent_job_id=?
-                            ORDER BY c.id
-                            """,
-                            (row["agent_job_id"],),
-                        )
-                    ]
-                    outputs = [
-                        dict(output)
-                        for output in connection.execute(
-                            """
-                            SELECT
-                                output.candidate_index,
-                                output.deliverable_id,
-                                output.revision_id,
-                                revision.revision_no,
-                                revision.title,
-                                revision.status
-                            FROM agent_candidate_review_outputs AS output
-                            JOIN deliverable_revisions AS revision
-                              ON revision.id=output.revision_id
-                            WHERE output.review_id=?
-                            ORDER BY output.candidate_index
-                            """,
-                            (row["review_id"],),
-                        )
-                    ]
-                    history.append(
-                        {
-                            "candidate_result_id": row["candidate_result_id"],
-                            "candidate_created_at": row["candidate_created_at"],
-                            "project": {
-                                "id": row["project_id"],
-                                "status": row["project_status"],
-                                "cycle_id": row["cycle_id"],
-                                "cycle_no": row["cycle_no"],
-                                "name": row["project_name"],
-                                "owner": row["project_owner"],
-                            },
-                            "agent_job": {
-                                "id": row["agent_job_id"],
-                                "action": row["action"],
-                                "status": row["agent_job_status"],
-                                "request_contract": json.loads(row["request_json"]),
-                            },
-                            "allowed_sources": allowed_sources,
-                            "original_result": json.loads(row["result_json"]),
-                            "review": {
-                                "id": row["review_id"],
-                                "decision": row["decision"],
-                                "actor": row["actor"],
-                                "actor_role": row["actor_role"],
-                                "reason": row["reason"],
-                                "reviewed_result": json.loads(
-                                    row["reviewed_result_json"]
-                                ),
-                                "created_at": row["reviewed_at"],
-                            },
-                            "outputs": outputs,
-                        }
+                items = [
+                    {
+                        "review": {
+                            "id": row["review_id"],
+                            "decision": row["decision"],
+                            "actor": row["actor"],
+                            "created_at": row["reviewed_at"],
+                        },
+                        "project": {
+                            "id": row["project_id"],
+                            "name": row["project_name"],
+                            "cycle_no": row["cycle_no"],
+                        },
+                        "agent_job": {"id": row["agent_job_id"]},
+                        "output_titles": row["output_titles"] or "",
+                    }
+                    for row in rows
+                ]
+                projects = [
+                    dict(row)
+                    for row in connection.execute(
+                        "SELECT p.id,pc.name FROM projects p LEFT JOIN project_cycles pc "
+                        "ON pc.id=p.current_cycle_id ORDER BY p.id DESC"
                     )
-                self.json_response(history)
+                ]
+                self.json_response(
+                    {
+                        "items": items,
+                        "total": total,
+                        "limit": limit,
+                        "offset": offset,
+                        "has_more": offset + len(items) < total,
+                        "projects": projects,
+                    }
+                )
                 return
             if path == "/api/agent-candidate-results/pending":
                 rows = connection.execute(
@@ -1497,14 +2457,424 @@ class Handler(BaseHTTPRequestHandler):
                     )
                 self.json_response(pending_reviews)
                 return
+            change_report_match = re.fullmatch(
+                r"/api/change-requests/(\d+)/report",
+                path,
+            )
+            if change_report_match:
+                report = change_request_report(
+                    connection,
+                    int(change_report_match.group(1)),
+                )
+                if not report:
+                    self.json_response(
+                        {"error": "变更单不存在"},
+                        HTTPStatus.NOT_FOUND,
+                    )
+                    return
+                self.json_response(report)
+                return
+            project_changes_match = re.fullmatch(
+                r"/api/projects/(\d+)/change-requests",
+                path,
+            )
+            if project_changes_match:
+                project_id = int(project_changes_match.group(1))
+                project = connection.execute(
+                    "SELECT id FROM projects WHERE id=?",
+                    (project_id,),
+                ).fetchone()
+                if not project:
+                    self.json_response(
+                        {"error": "项目不存在"},
+                        HTTPStatus.NOT_FOUND,
+                    )
+                    return
+                requested_status = query.get("status", [""])[0].strip()
+                if requested_status and requested_status not in {
+                    "proposed",
+                    "accepted",
+                    "rejected",
+                }:
+                    self.json_response(
+                        {"error": "变更单状态无效"},
+                        HTTPStatus.BAD_REQUEST,
+                    )
+                    return
+                sql = (
+                    "SELECT change_request.* FROM deliverable_change_requests change_request "
+                    "JOIN deliverables deliverable ON deliverable.id=change_request.deliverable_id "
+                    "WHERE deliverable.project_id=?"
+                )
+                parameters: list[Any] = [project_id]
+                if requested_status:
+                    sql += " AND change_request.status=?"
+                    parameters.append(requested_status)
+                sql += " ORDER BY change_request.created_at DESC,change_request.id DESC"
+                self.json_response(
+                    [
+                        change_request_record(row)
+                        for row in connection.execute(sql, tuple(parameters))
+                    ]
+                )
+                return
             if path == "/api/contents":
                 content_type = query.get("type", [""])[0]
                 rows = connection.execute("SELECT * FROM contents WHERE deleted_at='' AND type=? ORDER BY updated_at DESC", (content_type,)) if content_type else connection.execute("SELECT * FROM contents WHERE deleted_at='' ORDER BY updated_at DESC")
-                self.json_response([dict(row) for row in rows])
+                self.json_response([content_record(connection, row) for row in rows])
                 return
         self.json_response({"error": "接口不存在"}, HTTPStatus.NOT_FOUND)
 
     def handle_api_post(self, path: str, payload: dict[str, Any]) -> None:
+        change_request_match = re.fullmatch(
+            r"/api/deliverables/(\d+)/change-requests",
+            path,
+        )
+        if change_request_match:
+            deliverable_id = int(change_request_match.group(1))
+            actor = str(payload.get("actor", "")).strip()
+            reason = str(payload.get("reason", "")).strip()
+            raw_evidence_source_ids = payload.get("evidence_source_ids", [])
+            source_candidate_result_id = payload.get("source_candidate_result_id")
+            if not actor:
+                raise ValueError("请填写变更提出人")
+            if not reason:
+                raise ValueError("请填写变更原因")
+            if (
+                not isinstance(raw_evidence_source_ids, list)
+                or any(
+                    isinstance(value, bool)
+                    or not isinstance(value, int)
+                    or value < 1
+                    for value in raw_evidence_source_ids
+                )
+            ):
+                raise ValueError("变更依据编号无效")
+            evidence_source_ids = list(dict.fromkeys(raw_evidence_source_ids))
+            if source_candidate_result_id is not None and (
+                isinstance(source_candidate_result_id, bool)
+                or not isinstance(source_candidate_result_id, int)
+                or source_candidate_result_id < 1
+            ):
+                raise ValueError("候选结果编号无效")
+
+            created_at = now_iso()
+            with db() as connection:
+                deliverable = connection.execute(
+                    """
+                    SELECT
+                        d.*,
+                        p.status AS project_status,
+                        pc.owner AS project_owner
+                    FROM deliverables d
+                    JOIN projects p ON p.id=d.project_id
+                    LEFT JOIN project_cycles pc ON pc.id=p.current_cycle_id
+                    WHERE d.id=?
+                    """,
+                    (deliverable_id,),
+                ).fetchone()
+                if not deliverable:
+                    self.json_response(
+                        {"error": "交付成果不存在"},
+                        HTTPStatus.NOT_FOUND,
+                    )
+                    return
+                if deliverable["project_status"] != "active":
+                    self.json_response(
+                        {"error": "项目当前状态不可提出变更"},
+                        HTTPStatus.CONFLICT,
+                    )
+                    return
+                base_revision = connection.execute(
+                    "SELECT * FROM deliverable_revisions WHERE id=?",
+                    (deliverable["current_revision_id"],),
+                ).fetchone()
+                if not base_revision:
+                    self.json_response(
+                        {"error": "交付成果缺少当前版本"},
+                        HTTPStatus.CONFLICT,
+                    )
+                    return
+                requested_base_revision_id = payload.get("base_revision_id")
+                if requested_base_revision_id not in (None, base_revision["id"]):
+                    self.json_response(
+                        {"error": "当前版本已经变化，请刷新后重新提出变更"},
+                        HTTPStatus.CONFLICT,
+                    )
+                    return
+                base_fields = revision_business_fields(base_revision)
+                proposed_fields, changed_fields = normalize_revision_change_fields(
+                    base_fields,
+                    payload.get("proposed_fields"),
+                )
+                acceptance_items = normalize_acceptance_items(
+                    payload.get("acceptance_items")
+                )
+                impact_analysis = normalize_change_impacts(
+                    connection,
+                    deliverable["project_id"],
+                    deliverable_id,
+                    changed_fields,
+                    payload.get("impact_analysis"),
+                )
+                if evidence_source_ids:
+                    placeholders = ",".join("?" for _ in evidence_source_ids)
+                    source_count = connection.execute(
+                        f"SELECT COUNT(*) FROM contents WHERE deleted_at='' AND id IN ({placeholders})",
+                        tuple(evidence_source_ids),
+                    ).fetchone()[0]
+                    if source_count != len(evidence_source_ids):
+                        raise ValueError("变更依据不存在或已删除")
+                if source_candidate_result_id is not None:
+                    candidate_project = connection.execute(
+                        """
+                        SELECT aj.project_id
+                        FROM agent_candidate_results cr
+                        JOIN agent_jobs aj ON aj.id=cr.agent_job_id
+                        WHERE cr.id=?
+                        """,
+                        (source_candidate_result_id,),
+                    ).fetchone()
+                    if not candidate_project:
+                        raise ValueError("候选结果不存在")
+                    if candidate_project["project_id"] != deliverable["project_id"]:
+                        raise ValueError("候选结果不属于当前项目")
+                cursor = connection.execute(
+                    """
+                    INSERT INTO deliverable_change_requests(
+                        deliverable_id,
+                        base_revision_id,
+                        status,
+                        reason,
+                        base_fields_json,
+                        proposed_fields_json,
+                        changed_fields_json,
+                        impact_analysis_json,
+                        acceptance_items_json,
+                        evidence_source_ids_json,
+                        source_candidate_result_id,
+                        created_by,
+                        created_at,
+                        updated_at
+                    )
+                    VALUES (?, ?, 'proposed', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        deliverable_id,
+                        base_revision["id"],
+                        reason,
+                        json_compact(base_fields),
+                        json_compact(proposed_fields),
+                        json_compact(changed_fields),
+                        json_compact(impact_analysis),
+                        json_compact(acceptance_items),
+                        json_compact(evidence_source_ids),
+                        source_candidate_result_id,
+                        actor,
+                        created_at,
+                        created_at,
+                    ),
+                )
+                change_request_id = cursor.lastrowid
+                connection.execute(
+                    """
+                    INSERT INTO deliverable_change_events(
+                        change_request_id,event_type,actor,reason,snapshot_json,created_at
+                    )
+                    VALUES (?, 'proposed', ?, ?, ?, ?)
+                    """,
+                    (
+                        change_request_id,
+                        actor,
+                        reason,
+                        json_compact(
+                            {
+                                "base_fields": base_fields,
+                                "proposed_fields": proposed_fields,
+                                "changed_fields": changed_fields,
+                                "impact_analysis": impact_analysis,
+                                "acceptance_items": acceptance_items,
+                                "evidence_source_ids": evidence_source_ids,
+                            }
+                        ),
+                        created_at,
+                    ),
+                )
+                report = change_request_report(connection, change_request_id)
+            self.json_response(report, HTTPStatus.CREATED)
+            return
+
+        change_decision_match = re.fullmatch(
+            r"/api/change-requests/(\d+)/decision",
+            path,
+        )
+        if change_decision_match:
+            change_request_id = int(change_decision_match.group(1))
+            decision = str(payload.get("decision", "")).strip()
+            actor = str(payload.get("actor", "")).strip()
+            decision_reason = str(payload.get("reason", "")).strip()
+            if decision not in {"accepted", "rejected"}:
+                raise ValueError("变更决定无效")
+            if not actor:
+                raise ValueError("请填写决定负责人")
+            if not decision_reason:
+                raise ValueError("请填写决定原因")
+            decided_at = now_iso()
+            with db() as connection:
+                row = connection.execute(
+                    """
+                    SELECT
+                        change_request.*,
+                        deliverable.project_id,
+                        deliverable.current_revision_id,
+                        project.status AS project_status,
+                        cycle.owner AS project_owner
+                    FROM deliverable_change_requests change_request
+                    JOIN deliverables deliverable
+                      ON deliverable.id=change_request.deliverable_id
+                    JOIN projects project ON project.id=deliverable.project_id
+                    LEFT JOIN project_cycles cycle ON cycle.id=project.current_cycle_id
+                    WHERE change_request.id=?
+                    """,
+                    (change_request_id,),
+                ).fetchone()
+                if not row:
+                    self.json_response(
+                        {"error": "变更单不存在"},
+                        HTTPStatus.NOT_FOUND,
+                    )
+                    return
+                if row["status"] != "proposed":
+                    self.json_response(
+                        {"error": "变更单已经处理"},
+                        HTTPStatus.CONFLICT,
+                    )
+                    return
+                if row["project_status"] != "active":
+                    self.json_response(
+                        {"error": "项目当前状态不可处理变更"},
+                        HTTPStatus.CONFLICT,
+                    )
+                    return
+                if actor != row["project_owner"]:
+                    self.json_response(
+                        {"error": "只有当前项目负责人可以决定变更"},
+                        HTTPStatus.FORBIDDEN,
+                    )
+                    return
+
+                created_revision_id = None
+                final_fields = json.loads(row["proposed_fields_json"])
+                changed_fields = json.loads(row["changed_fields_json"])
+                impact_analysis = json.loads(row["impact_analysis_json"])
+                acceptance_items = json.loads(row["acceptance_items_json"])
+                if decision == "accepted":
+                    if row["current_revision_id"] != row["base_revision_id"]:
+                        self.json_response(
+                            {"error": "当前版本已经变化，请基于最新版重新提出变更"},
+                            HTTPStatus.CONFLICT,
+                        )
+                        return
+                    base_fields = json.loads(row["base_fields_json"])
+                    final_fields, changed_fields = normalize_revision_change_fields(
+                        base_fields,
+                        payload.get("final_fields", final_fields),
+                    )
+                    acceptance_items = normalize_acceptance_items(
+                        payload.get("acceptance_items", acceptance_items)
+                    )
+                    impact_analysis = normalize_change_impacts(
+                        connection,
+                        row["project_id"],
+                        row["deliverable_id"],
+                        changed_fields,
+                        payload.get("impact_analysis", impact_analysis),
+                    )
+                    revision_no = connection.execute(
+                        "SELECT COALESCE(MAX(revision_no),0)+1 "
+                        "FROM deliverable_revisions WHERE deliverable_id=?",
+                        (row["deliverable_id"],),
+                    ).fetchone()[0]
+                    cursor = connection.execute(
+                        """
+                        INSERT INTO deliverable_revisions(
+                            deliverable_id,revision_no,title,scope,
+                            acceptance_criteria,owner,approver,due_date,
+                            due_date_status,status,created_at,updated_at
+                        )
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'draft', ?, ?)
+                        """,
+                        (
+                            row["deliverable_id"],
+                            revision_no,
+                            final_fields["title"],
+                            final_fields["scope"],
+                            final_fields["acceptance_criteria"],
+                            final_fields["owner"],
+                            final_fields["approver"],
+                            final_fields["due_date"],
+                            final_fields["due_date_status"],
+                            decided_at,
+                            decided_at,
+                        ),
+                    )
+                    created_revision_id = cursor.lastrowid
+                    connection.execute(
+                        "UPDATE deliverables SET current_revision_id=? WHERE id=?",
+                        (created_revision_id, row["deliverable_id"]),
+                    )
+
+                connection.execute(
+                    """
+                    UPDATE deliverable_change_requests
+                    SET status=?, proposed_fields_json=?, changed_fields_json=?,
+                        impact_analysis_json=?, acceptance_items_json=?,
+                        decision_reason=?, decided_by=?, decided_at=?,
+                        created_revision_id=?, updated_at=?
+                    WHERE id=?
+                    """,
+                    (
+                        decision,
+                        json_compact(final_fields),
+                        json_compact(changed_fields),
+                        json_compact(impact_analysis),
+                        json_compact(acceptance_items),
+                        decision_reason,
+                        actor,
+                        decided_at,
+                        created_revision_id,
+                        decided_at,
+                        change_request_id,
+                    ),
+                )
+                connection.execute(
+                    """
+                    INSERT INTO deliverable_change_events(
+                        change_request_id,event_type,actor,reason,snapshot_json,created_at
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        change_request_id,
+                        decision,
+                        actor,
+                        decision_reason,
+                        json_compact(
+                            {
+                                "final_fields": final_fields,
+                                "changed_fields": changed_fields,
+                                "impact_analysis": impact_analysis,
+                                "acceptance_items": acceptance_items,
+                                "created_revision_id": created_revision_id,
+                            }
+                        ),
+                        decided_at,
+                    ),
+                )
+                report = change_request_report(connection, change_request_id)
+            self.json_response(report, HTTPStatus.CREATED)
+            return
+
         candidate_review_match = re.fullmatch(
             r"/api/agent-candidate-results/(\d+)/reviews",
             path,
@@ -1537,6 +2907,23 @@ class Handler(BaseHTTPRequestHandler):
                 formal_fields.get("due_date_status", "pending")
             ).strip()
             is_required = 1 if formal_fields.get("is_required", True) else 0
+            raw_acceptance_reference_ids = formal_fields.get(
+                "acceptance_reference_ids",
+                [],
+            )
+            if (
+                not isinstance(raw_acceptance_reference_ids, list)
+                or any(
+                    isinstance(reference_id, bool)
+                    or not isinstance(reference_id, int)
+                    or reference_id < 1
+                    for reference_id in raw_acceptance_reference_ids
+                )
+            ):
+                raise ValueError("验收参考编号格式无效")
+            acceptance_reference_ids = list(
+                dict.fromkeys(raw_acceptance_reference_ids)
+            )
             raw_target_deliverable_id = formal_fields.get("target_deliverable_id")
             target_deliverable_id = None
             if raw_target_deliverable_id not in (None, ""):
@@ -1617,6 +3004,23 @@ class Handler(BaseHTTPRequestHandler):
                         HTTPStatus.FORBIDDEN,
                     )
                     return
+
+                if decision == "rejected":
+                    acceptance_reference_ids = []
+                elif acceptance_reference_ids:
+                    placeholders = ",".join("?" for _ in acceptance_reference_ids)
+                    available_references = connection.execute(
+                        "SELECT id FROM contents "
+                        f"WHERE id IN ({placeholders}) "
+                        "AND type='acceptance-reference' AND deleted_at=''",
+                        tuple(acceptance_reference_ids),
+                    ).fetchall()
+                    if len(available_references) != len(acceptance_reference_ids):
+                        self.json_response(
+                            {"error": "验收参考不存在或已不可用"},
+                            HTTPStatus.FORBIDDEN,
+                        )
+                        return
 
                 result = json.loads(candidate_result["result_json"])
                 original_candidates = result.get("candidates", [])
@@ -1812,6 +3216,16 @@ class Handler(BaseHTTPRequestHandler):
                         ),
                     )
                     revision_id = revision_cursor.lastrowid
+                    for reference_id in acceptance_reference_ids:
+                        connection.execute(
+                            """
+                            INSERT INTO revision_acceptance_references(
+                                revision_id,content_id,linked_by,created_at
+                            )
+                            VALUES (?, ?, ?, ?)
+                            """,
+                            (revision_id, reference_id, actor, reviewed_at),
+                        )
                     connection.execute(
                         """
                         UPDATE deliverables
@@ -3178,6 +4592,10 @@ class Handler(BaseHTTPRequestHandler):
             category_id = payload.get("category_id") or None
             tags = normalize_tags(payload.get("tags", ""))
             body = str(payload.get("body", ""))
+            raw_ai_access = payload.get("ai_access", 1)
+            if raw_ai_access not in (0, 1, False, True):
+                raise ValueError("AI整理权限值无效")
+            ai_access = 1 if raw_ai_access else 0
             if not title:
                 raise ValueError("请填写标题")
             if content_type not in TYPE_FOLDERS:
@@ -3195,10 +4613,82 @@ class Handler(BaseHTTPRequestHandler):
             stored_body = BOOK_TEMPLATE.format(title=title) if content_type == "book" and not body.strip() else body
             with db() as connection:
                 cursor = connection.execute(
-                    "INSERT INTO contents(title,type,category,category_id,tags,source,markdown_path,body,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?)",
-                    (title, content_type, category, category_id, tags, payload.get("source", "manual"), markdown_path, stored_body, created, created),
+                    "INSERT INTO contents(title,type,category,category_id,tags,source,markdown_path,body,ai_access,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                    (title, content_type, category, category_id, tags, payload.get("source", "manual"), markdown_path, stored_body, ai_access, created, created),
                 )
                 item = dict(connection.execute("SELECT * FROM contents WHERE id=?", (cursor.lastrowid,)).fetchone())
+            self.json_response(item, HTTPStatus.CREATED)
+            return
+        if path == "/api/contents/upload":
+            original_name = Path(str(payload.get("name", ""))).name
+            encoded = str(payload.get("content_base64", "")).strip()
+            if not original_name or not encoded:
+                raise ValueError("请选择要上传的文件")
+            try:
+                raw = base64.b64decode(encoded, validate=True)
+            except (ValueError, binascii.Error) as exc:
+                raise ValueError("上传文件内容无效") from exc
+            if not raw:
+                raise ValueError("文件内容为空")
+            if len(raw) > MAX_UPLOAD_BYTES:
+                raise ValueError("单个文件不能超过 10 MB")
+            extracted = extract_uploaded_file_text(original_name, raw)
+            fallback_body = str(payload.get("body", "")).strip()
+            body = extracted or fallback_body
+            if not body:
+                raise ValueError("没有提取到可用文字；若是扫描 PDF，请在资料原文中补充可检索文字")
+            title = str(payload.get("title", "")).strip() or Path(original_name).stem
+            content_type = str(payload.get("type", "knowledge"))
+            if content_type not in TYPE_FOLDERS:
+                raise ValueError("内容类型不受支持")
+            category = str(payload.get("category", "")).strip()
+            category_id = payload.get("category_id") or None
+            tags = normalize_tags(payload.get("tags", ""))
+            raw_ai_access = payload.get("ai_access", 1)
+            if raw_ai_access not in (0, 1, False, True):
+                raise ValueError("AI整理权限值无效")
+            created = now_iso()
+            digest = hashlib.sha256(raw).hexdigest()
+            suffix = Path(original_name).suffix.lower()
+            stored_name = f"{uuid.uuid4().hex}{suffix}"
+            stored_target = UPLOAD_ROOT / stored_name
+            markdown_path = ""
+            with db() as connection:
+                if category_id:
+                    category_row = connection.execute(
+                        "SELECT id,content_type FROM categories WHERE id=?",
+                        (category_id,),
+                    ).fetchone()
+                    if not category_row or category_row["content_type"] != content_type:
+                        raise ValueError("分类卡片不存在或类型不匹配")
+                    category = category_path(connection, int(category_id))
+                elif category:
+                    category_id = ensure_category_path(connection, content_type, category)
+            try:
+                stored_target.write_bytes(raw)
+                markdown_path = write_markdown(title, content_type, category, tags, body, created)
+                with db() as connection:
+                    cursor = connection.execute(
+                        "INSERT INTO contents(title,type,category,category_id,tags,source,source_path,markdown_path,body,ai_access,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+                        (title, content_type, category, category_id, tags, "file-upload", original_name, markdown_path, body, 1 if raw_ai_access else 0, created, created),
+                    )
+                    content_id = cursor.lastrowid
+                    connection.execute(
+                        "INSERT INTO content_files(content_id,original_name,stored_path,media_type,size_bytes,sha256,created_at) VALUES (?,?,?,?,?,?,?)",
+                        (content_id, original_name, stored_name, mimetypes.guess_type(original_name)[0] or "application/octet-stream", len(raw), digest, created),
+                    )
+                    item = content_record(
+                        connection,
+                        connection.execute("SELECT * FROM contents WHERE id=?", (content_id,)).fetchone(),
+                    )
+            except Exception:
+                if stored_target.exists():
+                    stored_target.unlink()
+                if markdown_path:
+                    markdown_target = markdown_file_path(markdown_path)
+                    if markdown_target.exists() and CONTENT_ROOT.resolve() in markdown_target.parents:
+                        markdown_target.unlink()
+                raise
             self.json_response(item, HTTPStatus.CREATED)
             return
         if path == "/api/categories":
@@ -3415,6 +4905,14 @@ class Handler(BaseHTTPRequestHandler):
                 markdown_path = markdown_file_path(current["markdown_path"])
                 if markdown_path.exists() and CONTENT_ROOT.resolve() in markdown_path.parents:
                     markdown_path.unlink()
+                attached = connection.execute(
+                    "SELECT stored_path FROM content_files WHERE content_id=?",
+                    (content_id,),
+                ).fetchone()
+                if attached:
+                    upload_path = (UPLOAD_ROOT / attached["stored_path"]).resolve()
+                    if upload_path.is_file() and upload_path.parent == UPLOAD_ROOT.resolve():
+                        upload_path.unlink()
                 connection.execute("DELETE FROM contents WHERE id=?", (content_id,))
             self.json_response({"ok": True, "id": content_id})
             return
