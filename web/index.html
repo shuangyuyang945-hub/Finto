@@ -2,20 +2,20 @@
 <html lang="zh-CN">
 <head>
   <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-  <meta name="theme-color" content="#f3efe6"><title>Finto · 项目交付</title>
-  <meta name="description" content="核对要求、明确责任、跟踪交付与版本。">
+  <meta name="theme-color" content="#f3efe6"><title>Finto · 验收与变更追踪</title>
+  <meta name="description" content="在本机核对验收要求、映射专家反馈、保留版本和变更证据。">
   <script src="/project-overview.js" defer></script>
-  <link rel="stylesheet" href="/styles.css"><link rel="stylesheet" href="/tags.css"><link rel="stylesheet" href="/calendar.css"><link rel="stylesheet" href="/update.css"><link rel="stylesheet" href="/agent-review.css">
+  <link rel="stylesheet" href="/styles.css"><link rel="stylesheet" href="/tags.css"><link rel="stylesheet" href="/calendar.css"><link rel="stylesheet" href="/update.css"><link rel="stylesheet" href="/agent-review.css"><link rel="stylesheet" href="/change-control.css">
 </head>
 <body>
 <div class="app-shell">
   <aside class="sidebar">
-    <div class="brand"><div class="brand-mark">F</div><div><strong>Finto</strong><span>项目交付</span></div></div>
+    <div class="brand"><div class="brand-mark">F</div><div><strong>Finto</strong><span>验收与变更追踪</span></div></div>
     <nav class="nav" aria-label="主导航">
       <button class="nav-item active" data-view="projects"><span>⌂</span>项目总览</button>
       <button class="nav-item" data-view="deliverables"><span>◇</span>交付清单</button>
       <button class="nav-item" data-view="agentReview"><span>◎</span>待审建议</button>
-      <button class="nav-item" data-view="library"><span>▤</span>资料库（未按项目关联）</button>
+      <button class="nav-item" data-view="library"><span>▤</span>资料库</button>
     </nav>
     <div class="sidebar-foot"><button class="nav-item" data-view="settings"><span>⚙</span>设置</button><div class="local-badge"><i></i>数据保存在本机</div></div>
   </aside>
@@ -23,13 +23,13 @@
     <header class="topbar">
       <button id="menuButton" class="icon-button menu-button" aria-label="打开导航">☰</button>
       <div><p id="eyebrow"></p><h1 id="pageTitle">项目总览</h1></div>
-      <button class="primary-button" data-open-capture><span>＋</span>添加资料</button>
+      <button id="globalAddSource" class="primary-button" data-open-capture hidden><span>＋</span>添加资料</button>
     </header>
 
     <section id="projectsView" class="view active">
       <section class="panel project-context-panel">
         <div class="panel-head">
-          <div><span class="section-kicker">CURRENT PROJECT</span><h2>当前项目与周期</h2></div>
+          <div><h2>当前项目与周期</h2></div>
           <div class="project-context-actions"><button id="createProjectButton" class="primary-button" type="button">＋ 创建项目</button><button id="refreshProjects" class="secondary-button" type="button">刷新</button></div>
         </div>
         <label>选择项目<select id="projectChoice"><option>加载中……</option></select></label>
@@ -39,34 +39,37 @@
         <div class="project-workspace-actions"><button id="openProjectReview" class="secondary-button" type="button">查看本项目待审建议</button><button class="secondary-button" type="button" data-view-jump="deliverables">查看交付清单</button></div>
       </section>
       <section class="panel project-path-panel" aria-labelledby="projectPathTitle">
-        <span class="section-kicker">START HERE</span><h2 id="projectPathTitle">按这四步完成一次交付整理</h2>
-        <p>先确定项目范围。第2步可以添加新资料，也可以跳过；已有合适资料可直接跳到第3步。保存到资料库不会自动授权给任务，只有第3步勾选的资料会进入本次任务。</p>
+        <span class="section-kicker">LOCAL CONTROLLED WORKFLOW</span><h2 id="projectPathTitle">完成一次验收要求整理</h2>
+        <p>这是单机本地受控工具。选择本次依据，核对要求和专家反馈，人工批准后创建新版本；旧版本不会被覆盖。</p>
         <ol id="projectDeliveryPath" class="project-delivery-path">
           <li id="projectPathProject" class="project-path-step"><strong>1. 创建或选择项目</strong><span id="projectPathProjectStatus">正在检查项目……</span></li>
-          <li id="projectPathSource" class="project-path-step"><strong>2. 添加新资料（可选）</strong><span id="projectPathSourceStatus">正在检查资料……</span><button id="openProjectSource" class="secondary-button" type="button" data-open-capture>添加新资料</button></li>
-          <li id="projectPathAuthorization" class="project-path-step"><strong>3. 勾选本次授权资料</strong><span id="projectPathAuthorizationStatus">先选择一个进行中的项目。</span></li>
-          <li id="projectPathRun" class="project-path-step"><strong>4. 运行并进入待审</strong><span id="projectPathRunStatus">完成前3步后再运行；结果不会直接写入交付清单。</span></li>
+          <li id="projectPathAuthorization" class="project-path-step"><strong>2. 选择本次使用的资料</strong><span id="projectPathAuthorizationStatus">先选择一个进行中的项目。</span></li>
+          <li id="projectPathRun" class="project-path-step"><strong>3. 运行、核对并保留版本</strong><span id="projectPathRunStatus">选择资料后即可运行；结果不会直接写入交付清单。</span></li>
         </ol>
       </section>
       <section class="panel project-agent-panel">
-        <span class="section-kicker">NEXT ACTION</span>
-        <h2>生成交付建议</h2><p id="taskProjectLabel">请先创建或选择项目。</p>
+        <h2>整理验收要求与变更建议</h2><p id="taskProjectLabel">请先创建或选择项目。</p>
         <form id="projectAgentForm"><fieldset id="projectAgentFields" disabled style="border:0;padding:0">
-          <label>3. 勾选本次任务可使用的资料</label><div id="taskSourceChoices">正在加载资料……</div>
+          <label for="taskSourcePicker">选择本次任务使用的资料</label>
+          <div id="taskSourceChoices" class="task-source-picker">
+            <select id="taskSourcePicker"><option value="">正在加载资料……</option></select>
+            <div id="selectedTaskSources" class="selected-task-sources" aria-live="polite"></div>
+          </div>
+          <div class="source-helper"><span id="taskSourceCount">资料库 0</span><button id="openProjectSource" class="secondary-button" type="button" data-open-capture>添加资料</button></div>
           <label style="margin-top:16px">运行方式<select id="taskExecutionMode"><option value="deterministic">本地规则整理（不调用模型）</option><option value="ai">DeepSeek 辅助整理（调用模型）</option></select></label>
           <div id="executionModeGuide" class="execution-mode-guide" aria-label="运行方式选择说明">
-            <button class="execution-mode-choice" type="button" data-execution-mode-choice="deterministic"><strong>本地规则整理（不调用模型）</strong><span>适合：资料中有明确字段标签，例如“阶段成果、交付时间、验收要求”。免费且资料不发送给模型；没识别出的内容会列为待补充与确认。</span></button>
+            <button class="execution-mode-choice" type="button" data-execution-mode-choice="deterministic"><strong>本地规则整理（不调用模型）</strong><span>适合：资料中有明确字段标签，或使用系统支持的常见通知表达。免费且资料不发送给模型；无法确定的具体日期会列为待补充与确认。</span></button>
             <button class="execution-mode-choice" type="button" data-execution-mode-choice="ai"><strong>DeepSeek 辅助整理（调用模型）</strong><span>适合：要求分散在自然语言中，需要归纳上下文。只发送本次授权资料，可能产生模型费用。</span></button>
           </div>
           <p class="execution-mode-boundary">系统不会自动切换或自动调用模型。两种方式都只生成待审候选，不会直接修改正式交付内容。</p>
-          <label style="margin-top:16px">任务要求<textarea id="taskInstruction" rows="3" required>提取交付成果、截止日期及其字段级证据。缺少依据的内容列为待补充与确认，不猜测，不直接修改正式交付物。</textarea></label>
-          <button class="primary-button" type="submit">4. 冻结本次授权并运行</button>
+          <label style="margin-top:16px">任务要求<textarea id="taskInstruction" rows="3" required>提取交付成果、截止日期、验收要求及其字段级证据；识别专家反馈可能影响的交付物。缺少依据的内容列为待补充与确认，不猜测，不直接修改正式交付物。</textarea></label>
+          <button class="primary-button" type="submit">运行整理任务</button>
         </fieldset></form>
         <p id="projectAgentStatus" role="status" style="white-space:pre-wrap"></p>
         <button id="openTaskReview" class="secondary-button" type="button" hidden>进入本次待审建议</button>
       </section>
     </section>
-    <section id="deliverablesView" class="view"><section class="panel"><h2 id="deliverableProjectTitle">交付清单</h2><p>显示本项目所有交付物的当前版本。现有数据尚未记录交付物所属周期，不按周期筛选。</p><div id="projectDeliverables" style="overflow:auto" role="status">加载中……</div></section></section>
+    <section id="deliverablesView" class="view"><section class="panel"><h2 id="deliverableProjectTitle">交付清单</h2><p>查看本项目每项成果的当前版本、负责人、期限和状态；验收要求显示在成果下方，历史版本可继续展开。</p><div id="projectDeliverables" role="status">加载中……</div></section></section>
     <section id="todayView" class="view">
       <div class="quote-card"><span class="quote-mark">“</span><p>知识的价值，不在于收藏，而在于改变下一步行动。</p><span class="quote-note">今天只做一件真正重要的事</span></div>
       <div class="dashboard-grid">
@@ -84,9 +87,9 @@
     </section>
 
     <section id="libraryView" class="view">
-      <section class="panel" style="margin-bottom:20px"><h2>交付依据资料库</h2><p>在这里查阅要求、反馈和验收依据，再为每次 AI 任务选择授权来源。</p><p class="form-hint">当前资料跨项目共用，尚未建立项目关联。允许 AI 使用不代表已授权给某次任务。权限状态目前只读。</p></section>
+      <section class="panel" style="margin-bottom:20px"><h2>交付依据资料库</h2><p>在这里查阅要求、反馈和验收依据。资料可以跨项目复用；运行任务时，需要为本次任务单独选择资料。</p><p class="form-hint">“可用于 AI 整理”只表示资料具备使用资格，不代表已经授权给某次任务。权限状态目前只读。</p></section>
       <div class="library-toolbar"><div class="filter-row" id="libraryFilters">
-        <button class="filter active" data-filter="all">全部资料</button><label>AI使用状态<select id="sourceAccessFilter"><option value="all">全部状态</option><option value="1">允许 AI 使用</option><option value="0">禁止 AI 使用</option></select></label>
+        <button class="filter active" data-filter="all">全部资料</button><button class="filter" data-filter="knowledge">项目资料</button><button class="filter" data-filter="acceptance-reference">验收参考</button><button id="addAcceptanceReference" class="secondary-button" type="button">＋ 新建验收参考</button><label>AI整理权限<select id="sourceAccessFilter"><option value="all">全部状态</option><option value="1">可用于 AI 整理</option><option value="0">不可用于 AI 整理</option></select></label>
       </div><label class="search-box"><span>⌕</span><input id="librarySearch" placeholder="搜索标题、标签或内容"></label></div>
       <details class="category-map-panel"><summary>原有资料分类（保留历史组织方式）</summary><div class="category-map-head"><div><h2>资料分类</h2><p>这些分类不是项目归属；旧资料和分类保持保留。</p></div><button id="addRootCategory" class="secondary-button">＋ 新建分类</button></div><div id="categoryMap" class="category-map"></div></details>
       <div id="libraryGrid" class="library-grid"></div>
@@ -111,7 +114,7 @@
 
     <section id="agentReviewView" class="view">
       <div class="agent-review-intro">
-        <div><span class="section-kicker">HUMAN IN THE LOOP</span><h2>AI 候选必须经过负责人审查</h2><p>左侧是冻结的任务合同，中间保留 AI 原始输出，右侧才是负责人准备写入的正式草稿。</p></div>
+        <div><h2>AI 候选必须经过负责人审查</h2><p>左侧是冻结的任务合同，中间保留 AI 原始输出，右侧才是负责人准备写入的正式草稿。</p></div>
         <div class="review-mode-switch" aria-label="审查记录范围"><button id="pendingReviewMode" class="active" type="button">待我处理 <span id="pendingReviewCount">0</span></button><button id="reviewHistoryMode" type="button">已处理历史 <span id="agentReviewHistoryCount">0</span></button></div>
       </div>
       <div class="agent-review-shell">
@@ -135,7 +138,7 @@
 </div>
 
 <dialog id="createProjectDialog" class="modal" aria-labelledby="createProjectTitle"><form id="createProjectForm">
-  <div class="modal-head"><div><span class="section-kicker">PROJECT DELIVERY</span><h2 id="createProjectTitle">创建交付项目</h2></div><button id="closeCreateProject" type="button" class="icon-button" aria-label="关闭">×</button></div>
+  <div class="modal-head"><div><h2 id="createProjectTitle">创建交付项目</h2></div><button id="closeCreateProject" type="button" class="icon-button" aria-label="关闭">×</button></div>
   <label>项目名称<input id="newProjectName" required placeholder="例如：课程项目交付"></label>
   <label>项目负责人<input id="newProjectOwner" required placeholder="谁负责核对要求和审查建议"></label>
   <label>本轮范围<textarea id="newProjectScope" rows="4" placeholder="例如：完成数据库与配套说明文档"></textarea></label>
@@ -143,10 +146,45 @@
   <p id="createProjectStatus" role="status"></p>
   <div class="modal-actions"><button id="cancelCreateProject" type="button" class="secondary-button">取消</button><button id="submitCreateProject" type="submit" class="primary-button">创建项目与第1周期</button></div>
 </form></dialog>
+<dialog id="changeRequestDialog" class="modal change-request-modal" aria-labelledby="changeRequestTitle"><form id="changeRequestForm">
+  <input id="changeDeliverableId" type="hidden"><input id="changeRequestId" type="hidden">
+  <div class="modal-head"><div><h2 id="changeRequestTitle">提出版本变更</h2></div><button id="closeChangeRequest" type="button" class="icon-button" aria-label="关闭">×</button></div>
+  <p id="changeRequestContext" class="form-hint"></p>
+  <section id="changeDiffPreview" class="change-diff-preview" aria-live="polite"></section>
+  <label><span id="changeReasonLabel">变更原因</span><textarea id="changeReason" rows="3" required placeholder="说明为什么需要改变当前版本"></textarea></label>
+  <div class="form-grid"><label>成果名称<input id="changeTitle" required></label><label>截止日期<input id="changeDueDate" type="date"></label></div>
+  <label>交付范围<textarea id="changeScope" rows="3"></textarea></label>
+  <label>验收标准<textarea id="changeAcceptanceCriteria" rows="3"></textarea></label>
+  <div class="form-grid"><label>执行负责人<input id="changeOwner" required></label><label>验收负责人<input id="changeApprover" required></label></div>
+  <label>日期状态<select id="changeDueDateStatus"><option value="confirmed">已确认</option><option value="pending">待确认</option></select></label>
+  <fieldset class="change-fieldset"><legend>影响类型</legend><div id="changeImpactTypes" class="change-check-grid"><label><input type="checkbox" value="scope">范围变化</label><label><input type="checkbox" value="schedule">期限变化</label><label><input type="checkbox" value="responsibility">负责人变化</label><label><input type="checkbox" value="acceptance">验收变化</label></div><label>影响说明<textarea id="changeImpactDescription" rows="2" placeholder="说明本次变化会造成什么影响"></textarea></label></fieldset>
+  <fieldset class="change-fieldset"><legend>受影响的交付成果</legend><div id="changeAffectedDeliverables" class="change-check-list"></div></fieldset>
+  <fieldset class="change-fieldset"><legend>新版本验收清单</legend><div id="changeAcceptanceItems" class="acceptance-item-list"></div><button id="addAcceptanceItem" type="button" class="secondary-button">＋ 添加验收项</button></fieldset>
+  <fieldset class="change-fieldset"><legend>变更依据（可选）</legend><div id="changeEvidenceSources" class="change-check-list"></div></fieldset>
+  <p id="changeRequestStatus" role="status"></p>
+  <div class="modal-actions split-actions"><button id="rejectChangeRequest" type="button" class="danger-button" hidden>拒绝变更</button><span><button id="cancelChangeRequest" type="button" class="secondary-button">取消</button><button id="submitChangeRequest" type="submit" class="primary-button">保存待确认变更</button></span></div>
+</form></dialog>
+<dialog id="revisionDetailDialog" class="modal revision-detail-modal" aria-labelledby="revisionDetailTitle">
+  <div class="modal-head"><div><h2 id="revisionDetailTitle">版本详情</h2></div><button id="closeRevisionDetail" type="button" class="icon-button" aria-label="关闭">×</button></div>
+  <div id="revisionDetailContent" class="revision-detail-content"></div>
+</dialog>
 <dialog id="captureDialog" class="modal"><form id="captureForm" method="dialog">
-  <div class="modal-head"><div><span class="section-kicker">DELIVERY SOURCE</span><h2>添加交付依据</h2></div><button type="button" class="icon-button" data-close-modal>×</button></div>
-  <label>资料名称<input id="captureTitle" required placeholder="例如：项目任务书、检查反馈"></label><label>资料原文<textarea id="captureBody" rows="9" required placeholder="粘贴已经确认可以保存的要求、反馈或验收依据原文"></textarea></label>
-  <p class="form-hint">资料会保存到交付依据资料库，并默认允许 AI 使用。保存资料不等于授权给本次任务；运行任务前仍需在当前项目中明确选择本次授权资料。</p><div class="modal-actions"><button type="button" class="secondary-button" data-close-modal>取消</button><button class="primary-button" type="submit">保存资料</button></div>
+  <div class="modal-head"><div><h2>添加交付依据</h2></div><button type="button" class="icon-button" data-close-modal>×</button></div>
+  <fieldset class="capture-mode"><legend>添加方式</legend><label><input type="radio" name="captureMode" value="file" checked> 上传文件</label><label><input type="radio" name="captureMode" value="text"> 粘贴文字</label></fieldset>
+  <label>资料名称<input id="captureTitle" placeholder="不填写时使用文件名"></label>
+  <label id="captureFileField">选择文件<input id="captureFile" type="file" accept=".pdf,.docx,.xlsx,.csv,.txt,.md,.markdown,application/pdf" required><span class="form-hint">支持 PDF、DOCX、XLSX、CSV、TXT、Markdown，单个文件不超过 10 MB。原件与可检索文字会一起保留。</span></label>
+  <label id="captureBodyField" hidden>资料原文<textarea id="captureBody" rows="9" placeholder="粘贴已经确认可以保存的要求、反馈或验收依据原文"></textarea></label>
+  <p id="captureStatus" class="form-hint" role="status">保存资料不等于授权给本次任务；运行任务前仍需在当前项目中明确选择。</p><div class="modal-actions"><button type="button" class="secondary-button" data-close-modal>取消</button><button class="primary-button" type="submit">保存资料</button></div>
+</form></dialog>
+<dialog id="acceptanceReferenceDialog" class="modal" aria-labelledby="acceptanceReferenceTitle"><form id="acceptanceReferenceForm">
+  <div class="modal-head"><div><h2 id="acceptanceReferenceTitle">新建验收参考</h2></div><button id="closeAcceptanceReference" type="button" class="icon-button" aria-label="关闭">×</button></div>
+  <p class="form-hint">保存可复用的验收规范、检查清单或示例。它不会自动授权给 AI；负责人可在审查候选时主动引用。</p>
+  <label>参考名称<input id="acceptanceReferenceName" required placeholder="例如：数据库交付验收清单"></label>
+  <label>参考内容<textarea id="acceptanceReferenceBody" rows="9" required placeholder="写清检查项、通过条件或参考规范"></textarea></label>
+  <label>自定义分类<select id="acceptanceReferenceCategory"><option value="">未分类</option></select></label>
+  <label>标签<input id="acceptanceReferenceTags" placeholder="例如：数据库, 文档, 课程项目"></label>
+  <p id="acceptanceReferenceStatus" role="status"></p>
+  <div class="modal-actions"><button id="cancelAcceptanceReference" type="button" class="secondary-button">取消</button><button class="primary-button" type="submit">保存验收参考</button></div>
 </form></dialog>
 
 <dialog id="taskDialog" class="modal small-modal"><form id="taskForm" method="dialog">
@@ -154,17 +192,17 @@
 </form></dialog>
 <dialog id="editDialog" class="modal"><form id="editForm" method="dialog">
   <div class="modal-head"><div><span class="section-kicker">EDIT CONTENT</span><h2>编辑知识内容</h2></div><button type="button" class="icon-button" data-close-edit>×</button></div>
-  <label>内容标题<input id="editTitle" required></label><label>Markdown 正文<textarea id="editBody" rows="12" placeholder="编辑知识正文……"></textarea></label><div class="form-grid"><label>内容类型<select id="editType"><option value="thought">随手想法</option><option value="knowledge">正式知识</option><option value="book">读书记录</option><option value="media">视频 / 网页</option><option value="journal">日记</option><option value="project">项目</option><option value="chat-note">聊天知识</option></select></label><label>分类卡片<select id="editCategory"><option value="">未分类</option></select></label></div><label>辅助标签<input id="editTags" placeholder="多个标签用逗号分隔"></label><div class="modal-actions split-actions"><button id="deleteContentButton" type="button" class="danger-button">移到回收站</button><span><button type="button" class="secondary-button" data-close-edit>取消</button><button class="primary-button" type="submit">保存修改</button></span></div>
+  <label>内容标题<input id="editTitle" required></label><label>Markdown 正文<textarea id="editBody" rows="12" placeholder="编辑知识正文……"></textarea></label><div class="form-grid"><label>内容类型<select id="editType"><option value="thought">随手想法</option><option value="knowledge">正式知识</option><option value="acceptance-reference">验收参考</option><option value="book">读书记录</option><option value="media">视频 / 网页</option><option value="journal">日记</option><option value="project">项目</option><option value="chat-note">聊天知识</option></select></label><label>分类卡片<select id="editCategory"><option value="">未分类</option></select></label></div><label>辅助标签<input id="editTags" placeholder="多个标签用逗号分隔"></label><div class="modal-actions split-actions"><button id="deleteContentButton" type="button" class="danger-button">移到回收站</button><span><button type="button" class="secondary-button" data-close-edit>取消</button><button class="primary-button" type="submit">保存修改</button></span></div>
 </form></dialog>
 <dialog id="categoryDialog" class="modal small-modal"><form id="categoryForm" method="dialog">
-  <div class="modal-head"><div><span class="section-kicker">CATEGORY CARD</span><h2 id="categoryDialogTitle">新建分类卡片</h2></div><button type="button" class="icon-button" data-close-category>×</button></div><label>卡片名称<input id="categoryName" required placeholder="例如 客户沟通"></label><div class="form-grid"><label>所属内容类型<select id="categoryType"><option value="knowledge">知识</option><option value="book">书籍</option><option value="media">媒体</option><option value="thought">想法</option><option value="journal">日记</option><option value="project">项目</option><option value="chat-note">聊天知识</option></select></label><label>母卡<select id="categoryParent"><option value="">无母卡（作为根卡片）</option></select></label></div><div class="modal-actions split-actions"><button id="deleteCategoryButton" type="button" class="danger-button" hidden>删除分类</button><span><button type="button" class="secondary-button" data-close-category>取消</button><button class="primary-button" type="submit">保存分类</button></span></div>
+  <div class="modal-head"><div><span class="section-kicker">CATEGORY CARD</span><h2 id="categoryDialogTitle">新建分类卡片</h2></div><button type="button" class="icon-button" data-close-category>×</button></div><label>卡片名称<input id="categoryName" required placeholder="例如 客户沟通"></label><div class="form-grid"><label>所属内容类型<select id="categoryType"><option value="knowledge">知识</option><option value="acceptance-reference">验收参考</option><option value="book">书籍</option><option value="media">媒体</option><option value="thought">想法</option><option value="journal">日记</option><option value="project">项目</option><option value="chat-note">聊天知识</option></select></label><label>母卡<select id="categoryParent"><option value="">无母卡（作为根卡片）</option></select></label></div><div class="modal-actions split-actions"><button id="deleteCategoryButton" type="button" class="danger-button" hidden>删除分类</button><span><button type="button" class="secondary-button" data-close-category>取消</button><button class="primary-button" type="submit">保存分类</button></span></div>
 </form></dialog>
 <dialog id="onboardingDialog" class="onboarding-modal">
   <div class="onboarding-shell">
     <div class="onboarding-progress" aria-label="引导进度"><i></i><i></i><i></i></div>
-    <section class="onboarding-step" data-onboarding-step="0"><span class="onboarding-mark">B</span><span class="section-kicker">WELCOME TO BRAINSTORM</span><h2>先确定这次要完成什么</h2><p>每次工作从一个交付项目和当前周期开始，项目负责人负责确认范围、依据和最终成果。</p></section>
-    <section class="onboarding-step" data-onboarding-step="1" hidden><span class="onboarding-symbol">资料<br><b>授权</b></span><span class="section-kicker">SOURCE BOUNDARY</span><h2>资料先保存，再逐次授权</h2><p>资料库保存要求、反馈和验收依据；只有你在当前项目中明确选择的资料，才能进入本次整理任务。</p></section>
-    <section class="onboarding-step" data-onboarding-step="2" hidden><span class="onboarding-symbol capture-symbol">✓</span><span class="section-kicker">HUMAN IN THE LOOP</span><h2>候选先审查，再成为成果</h2><p>系统只生成带证据的候选。负责人核对并创建待确认成果后，正式版本才进入后续确认和执行。</p></section>
+    <section class="onboarding-step" data-onboarding-step="0"><span class="onboarding-mark">F</span><h2>先确定这次要完成什么</h2><p>每次工作从一个交付项目和当前周期开始，项目负责人负责确认范围、依据和最终成果。</p></section>
+    <section class="onboarding-step" data-onboarding-step="1" hidden><span class="onboarding-symbol">资料<br><b>授权</b></span><h2>资料先保存，再逐次授权</h2><p>资料库保存要求、反馈和验收依据；只有你在当前项目中明确选择的资料，才能进入本次整理任务。</p></section>
+    <section class="onboarding-step" data-onboarding-step="2" hidden><span class="onboarding-symbol capture-symbol">✓</span><h2>候选先审查，再成为成果</h2><p>系统只生成带证据的候选。负责人核对并创建待确认成果后，正式版本才进入后续确认和执行。</p></section>
     <div class="onboarding-actions"><button id="skipOnboarding" class="text-button" type="button">跳过引导</button><span><button id="previousOnboarding" class="secondary-button" type="button" hidden>上一步</button><button id="nextOnboarding" class="primary-button" type="button">下一步</button><button id="finishOnboarding" class="primary-button" type="button" hidden>添加第一份资料</button></span></div>
   </div>
 </dialog>
