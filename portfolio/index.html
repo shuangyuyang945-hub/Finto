@@ -1,0 +1,234 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="description" content="Finto：面向专业项目交付的验收与变更追踪工具。展示业务问题、产品流程、真实案例证据与实现边界。">
+    <meta name="theme-color" content="#0b2b43">
+    <meta property="og:title" content="Finto｜项目交付验收与变更追踪工具">
+    <meta property="og:description" content="让每次业务纠错都有依据、有决定、有新版本，也保留旧版本。">
+    <meta property="og:type" content="website">
+    <title>Finto｜项目交付验收与变更追踪工具</title>
+    <link rel="stylesheet" href="styles.css">
+  </head>
+  <body>
+    <a class="skip-link" href="#main">跳到主要内容</a>
+    <header class="site-header">
+      <a class="brand" href="#top" aria-label="返回顶部">
+        <span class="brand-mark" aria-hidden="true">F</span>
+        <span>Finto</span>
+      </a>
+      <nav aria-label="页面导航">
+        <a href="#problem">业务问题</a>
+        <a href="#workflow">工作流</a>
+        <a href="#evidence">案例证据</a>
+        <a href="#boundary">实现边界</a>
+      </nav>
+      <a class="header-link" href="https://github.com/shuangyuyang945-hub/Finto" target="_blank" rel="noreferrer">GitHub <span aria-hidden="true">↗</span></a>
+    </header>
+
+    <main id="main">
+      <section class="hero" id="top">
+        <div class="hero-copy">
+          <div class="eyebrow"><span></span> 个人实践项目 · 单机本地工具 · v0.6.1</div>
+          <h1>让项目交付中的每次纠错<br><em>都有依据，也有版本。</em></h1>
+          <p class="hero-lead">Finto 面向验收要求分散、责任边界不清、修改难以追溯的专业项目，把资料依据、人工决定和交付版本串成一条可审查的业务链。</p>
+          <div class="hero-actions">
+            <a class="button primary" href="#evidence">查看真实案例</a>
+            <a class="button secondary" href="https://github.com/shuangyuyang945-hub/Finto" target="_blank" rel="noreferrer">查看源代码 <span aria-hidden="true">↗</span></a>
+          </div>
+          <p class="scope-note">本页是静态作品展示；Finto 本体在 Windows 本地运行，不上传项目资料。</p>
+        </div>
+
+        <div class="product-window" aria-label="Finto 产品流程示意图">
+          <div class="window-bar">
+            <span></span><span></span><span></span>
+            <b>变更请求 #1</b>
+          </div>
+          <div class="window-body">
+            <div class="status-row">
+              <span class="pill amber">等待负责人决定</span>
+              <span class="tiny">来源：Source #10</span>
+            </div>
+            <div class="change-grid">
+              <div class="change-card before">
+                <small>修改前 · Revision #5</small>
+                <p>将后续报送节点误写为评审日期</p>
+              </div>
+              <div class="arrow" aria-hidden="true">→</div>
+              <div class="change-card after">
+                <small>修改后 · Revision #6</small>
+                <p>按来源依据纠正交付范围与验收项</p>
+              </div>
+            </div>
+            <div class="evidence-line">
+              <span class="check">✓</span>
+              <div><b>字段级依据已定位</b><small>原资料、事实边界与待验证事项完整保留</small></div>
+            </div>
+            <div class="decision-row"><button type="button">接受变更并创建新版本</button><span>旧版本不会被覆盖</span></div>
+          </div>
+        </div>
+      </section>
+
+      <section class="problem section" id="problem">
+        <div class="section-heading">
+          <span class="section-no">01</span>
+          <div>
+            <p class="kicker">从真实交付问题出发</p>
+            <h2>问题不在“有没有文档”，而在变化发生后还能否说清楚。</h2>
+          </div>
+        </div>
+        <div class="problem-grid">
+          <article>
+            <span class="icon">散</span>
+            <h3>验收要求分散</h3>
+            <p>任务书、通知、报告和反馈分别保存，字段依据难以定位，整理时容易遗漏或误读。</p>
+          </article>
+          <article>
+            <span class="icon">改</span>
+            <h3>修改直接覆盖</h3>
+            <p>业务事实或交付口径变化后，旧版本被覆盖，难以回答“为什么改、从什么改成什么”。</p>
+          </article>
+          <article>
+            <span class="icon">责</span>
+            <h3>系统越过负责人</h3>
+            <p>AI 可以提出候选，但不能替业务负责人确认事实、接受变更或宣布验收通过。</p>
+          </article>
+        </div>
+      </section>
+
+      <section class="workflow section dark" id="workflow">
+        <div class="section-heading light">
+          <span class="section-no">02</span>
+          <div>
+            <p class="kicker">Human in the loop</p>
+            <h2>把 AI 放在可控的位置，把决定留给负责人。</h2>
+          </div>
+        </div>
+        <div class="flow-list">
+          <article><span>01</span><h3>授权资料</h3><p>任务执行前冻结可用来源、动作和禁止范围，避免模型自行扩权。</p></article>
+          <article><span>02</span><h3>提取候选</h3><p>零 Token 规则解析或大模型 API 生成候选字段，不直接写入正式交付物。</p></article>
+          <article><span>03</span><h3>核对依据</h3><p>候选携带字段级来源、定位与待确认信息，支持人工逐项复核。</p></article>
+          <article><span>04</span><h3>人工决定</h3><p>负责人原样接受、修改后接受或拒绝，所有决定进入审计记录。</p></article>
+          <article><span>05</span><h3>创建版本</h3><p>只有接受后才创建正式 Revision；新版本生效，旧版本仍可追溯。</p></article>
+        </div>
+        <div class="tech-strip" aria-label="项目技术栈">
+          <span>Python</span><span>SQLite</span><span>原生 JavaScript</span><span>大模型 API</span><span>GitHub Actions</span><span>Windows</span>
+        </div>
+      </section>
+
+      <section class="evidence section" id="evidence">
+        <div class="section-heading">
+          <span class="section-no">03</span>
+          <div>
+            <p class="kicker">证据，而非口号</p>
+            <h2>用历史案例回放检验一条完整的受控变更链。</h2>
+          </div>
+        </div>
+        <div class="case-layout">
+          <div class="case-story">
+            <div class="case-label">去标识化历史子案例</div>
+            <h3>发现 1 处业务事实错误，完成从证据到新版本的闭环。</h3>
+            <p>原版本把后续报告报送日期误写成评审日期。Finto 将已授权资料中的节点作为字段依据，由负责人提出并接受变更，创建新版本，同时保留旧版本、决定原因和待验证验收项。</p>
+            <ol>
+              <li><b>Source #10</b><span>定位两个报送节点与事实边界</span></li>
+              <li><b>变更请求 #1</b><span>记录修改前后、影响范围和决定原因</span></li>
+              <li><b>Revision #5 → #6</b><span>新版本确认，旧版本完整保留</span></li>
+            </ol>
+          </div>
+          <div class="metrics">
+            <article><strong>1</strong><span>处业务事实得到纠正</span></article>
+            <article><strong>2</strong><span>个版本可回看、可比较</span></article>
+            <article><strong>3</strong><span>条验收项保持“待验证”</span></article>
+            <article><strong>26<small>分</small>06<small>秒</small></strong><span>本次受控变更路径实测耗时</span></article>
+          </div>
+        </div>
+        <div class="evidence-note">
+          <b>证据口径</b>
+          <p>26 分 06 秒是一次历史案例回放的路径耗时；因未记录人工基线，不据此声称效率提升。该案例证明流程可运行、结果可追溯，不代表多人协作或生产环境验证。</p>
+        </div>
+      </section>
+
+      <section class="evaluation section">
+        <div class="section-heading compact">
+          <span class="section-no">04</span>
+          <div>
+            <p class="kicker">数据驱动迭代</p>
+            <h2>固定样本与规则，比较修改前后的真实表现。</h2>
+          </div>
+        </div>
+        <div class="evaluation-card">
+          <div class="score-visual">
+            <div><span>v1</span><b>7<small>/10</small></b><em>需人工接管</em></div>
+            <div class="score-arrow">→</div>
+            <div class="best"><span>v2</span><b>1<small>/10</small></b><em>需人工接管</em></div>
+          </div>
+          <div class="score-copy">
+            <h3>10 个案例的提示词版本对照评测</h3>
+            <p>在固定模型、固定数据集与统一评分规则下，对 v1 / v2 进行单轮对照；梳理 8 类风险与 3 个 Bad Case，并保留上线前修正项。</p>
+            <small>口径说明：7/10 与 1/10 是测试案例中“需要人工接管”的数量，不代表模型准确率，也不外推到其他数据或模型。</small>
+          </div>
+        </div>
+      </section>
+
+      <section class="boundary section" id="boundary">
+        <div class="section-heading">
+          <span class="section-no">05</span>
+          <div>
+            <p class="kicker">能力与边界</p>
+            <h2>展示已经完成的，也清楚说明尚未验证的。</h2>
+          </div>
+        </div>
+        <div class="boundary-grid">
+          <article class="done">
+            <h3><span>✓</span> 已实现</h3>
+            <ul>
+              <li>项目、周期、交付物与 Revision 版本历史</li>
+              <li>任务级来源授权、字段证据与人工审查</li>
+              <li>本地规则解析与 OpenAI-compatible AI 模式</li>
+              <li>PDF、DOCX、XLSX、CSV、TXT、Markdown 资料处理</li>
+              <li>变更影响分析、审计记录与 Windows 本地运行</li>
+            </ul>
+          </article>
+          <article class="limit">
+            <h3><span>—</span> 当前边界</h3>
+            <ul>
+              <li>个人实践项目，业务验证来自历史案例回放与本人使用</li>
+              <li>单机单用户，没有账号、多人并发权限与远程部署</li>
+              <li>负责人是业务流程字段，尚未实现登录身份鉴权</li>
+              <li>扫描图片型 PDF 尚不支持 OCR</li>
+              <li>不宣称企业级平台、生产落地或外部市场验证</li>
+            </ul>
+          </article>
+        </div>
+      </section>
+
+      <section class="role section">
+        <div>
+          <p class="kicker">我的工作</p>
+          <h2>从业务问题定义，到可运行原型和证据验证。</h2>
+        </div>
+        <div class="role-grid">
+          <article><b>业务与产品</b><p>从真实项目复盘中定义问题，梳理角色、状态、验收边界和变更流程。</p></article>
+          <article><b>实现与复核</b><p>借助 AI 完成 Python、SQLite 与原生 JavaScript 原型；本人负责规则定义、配置运行、排错和结果复核。</p></article>
+          <article><b>质量与交付</b><p>建立固定案例评测、回归测试、版本发布、演示脚本和故障定位材料。</p></article>
+        </div>
+      </section>
+
+      <section class="cta section">
+        <p class="kicker">继续审查这个项目</p>
+        <h2>产品价值写在这里，代码、测试和交付文档留在 GitHub。</h2>
+        <div class="hero-actions center">
+          <a class="button primary light-button" href="https://github.com/shuangyuyang945-hub/Finto" target="_blank" rel="noreferrer">打开 GitHub 仓库 <span aria-hidden="true">↗</span></a>
+          <a class="button ghost" href="https://github.com/shuangyuyang945-hub/Finto#readme" target="_blank" rel="noreferrer">阅读项目说明</a>
+          <a class="button ghost" href="https://github.com/shuangyuyang945-hub/Finto/releases" target="_blank" rel="noreferrer">查看发布版本</a>
+        </div>
+      </section>
+    </main>
+
+    <footer>
+      <div><b>Finto</b><span>项目交付验收与变更追踪工具</span></div>
+      <p>个人实践项目 · 页面不包含真实项目资料、个人信息或 API Key</p>
+    </footer>
+  </body>
+</html>
