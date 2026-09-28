@@ -121,11 +121,9 @@ python -m unittest discover -s tests -v
 
 ## 成熟交付文档
 
-- [Finto 项目复习指南](product-docs/Finto项目复习指南.md)
 - [项目交付产品蓝图](product-docs/Finto项目交付产品蓝图.md)
 - [项目交付首页原型](product-docs/Finto项目交付首页原型.html)
 - [一页 POC 方案](product-docs/Finto一页POC方案.md)
-- [土壤三普历史案例回放方案](product-docs/Finto土壤三普历史案例回放方案.md)
 - [三分钟产品 Demo](product-docs/Finto三分钟产品Demo.md)
 - [七分钟售前 Demo](product-docs/Finto七分钟售前Demo.md)
 - [故障定位 SOP](product-docs/Finto故障定位SOP.md)

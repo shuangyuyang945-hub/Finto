@@ -34,3 +34,7 @@ product-docs/*JD*
 product-docs/*岗位*
 product-docs/*投递*
 product-docs/*面试*
+
+# Local review and case-study notes are kept outside the public repository.
+product-docs/Finto项目复习指南.md
+product-docs/Finto土壤三普历史案例回放方案.md

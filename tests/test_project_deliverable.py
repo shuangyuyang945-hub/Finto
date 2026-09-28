@@ -4737,29 +4737,14 @@ class AgentReviewAssetTests(unittest.TestCase):
         self.assertIn("table-layout:fixed", styles)
         self.assertIn(".deliverable-table thead{display:none}", styles)
 
-    def test_product_positioning_and_real_validation_boundaries_are_explicit(self):
+    def test_product_positioning_and_public_validation_boundaries_are_explicit(self):
         html = (server.WEB_ROOT / "index.html").read_text(encoding="utf-8")
-        replay = (
-            server.ROOT
-            / "product-docs"
-            / "Finto土壤三普历史案例回放方案.md"
-        ).read_text(encoding="utf-8")
         validation = (
             server.ROOT / "product-docs" / "Finto一页POC方案.md"
         ).read_text(encoding="utf-8")
 
         for text in ("验收与变更追踪", "单机本地受控工具", "专家反馈"):
             self.assertIn(text, html)
-        for text in (
-            "简化子案例执行结果",
-            "Source #10",
-            "Revision #5",
-            "Revision #6",
-            "26 分 06 秒",
-            "不能证明全部要求提取覆盖率",
-            "相对人工的效率提升",
-        ):
-            self.assertIn(text, replay)
         for text in (
             "1 个已完成的去标识化历史子案例",
             "Source #10",
